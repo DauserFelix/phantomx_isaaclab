@@ -134,13 +134,16 @@ class PhantomxThesisEnv(DirectRLEnv):
             torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]),
             dim=1
         )
-        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
+        # kernel width war 0.25 — bei kleinen Curriculum-Kommandos (0.05-0.3 m/s) gab das
+        # Stillstehen (v=0) schon 85-96% des Max-Rewards (siehe Session-Log 2026-07-09).
+        # 0.1 differenziert Stillstehen klarer von Tracking, auch bei kleinen Kommandos.
+        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.1)
 
         # yaw rate tracking
         yaw_rate_error = torch.square(
             self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2]
         )
-        yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
+        yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.1)
 
         # z velocity penalty (body should not bounce)
         z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
@@ -175,13 +178,17 @@ class PhantomxThesisEnv(DirectRLEnv):
         # Alive reward
         alive_reward = torch.ones_like(lin_vel_error)
 
-        # Movement penalty: only active when a forward command is given.
-        # Without this guard, the penalty cancels track_lin_vel_xy_exp exactly
-        # when commands=0 (both are 0.2/step), leaving zero net gradient signal.
+        # Movement penalty: continuous velocity deficit (command - actual), clamped to [0, ∞).
+        # Proportional signal replaces the old binary switch so the policy has a
+        # gradient even when deeply stuck (binary gave constant -0.2/step regardless).
         forward_speed = self._robot.data.root_lin_vel_b[:, 0]
-        has_forward_command = self._commands[:, 0].abs() > 0.05
-        is_moving_forward = forward_speed > self.cfg.movement_speed_x
-        movement_penalty = (~is_moving_forward & has_forward_command).float()
+        command_speed = self._commands[:, 0]
+        # Schwelle relativ zu movement_speed_x statt hardcodiert — sonst waere dieser Check
+        # tot, sobald movement_speed_x <= 0.05 ist (Kommandos koennten den Threshold nie
+        # ueberschreiten). Siehe Session-Log 2026-07-10.
+        has_forward_command = command_speed.abs() > 0.1 * self.cfg.movement_speed_x
+        velocity_deficit = torch.clamp(command_speed - forward_speed, min=0.0)
+        movement_penalty = velocity_deficit * has_forward_command.float()
 
         # Foot contact reward — bonus for stable tripod support base (≥3 feet on ground)
         foot_forces = self._contact_sensor.data.net_forces_w[:, self._die_body_ids, :]
@@ -262,21 +269,32 @@ class PhantomxThesisEnv(DirectRLEnv):
         self._previous_actions[env_ids] = 0.0
         self._has_stood_up[env_ids] = False
 
-        # Velocity curriculum
-        # common_step_counter counts policy-steps; multiply by num_envs to get
-        # approximate total transitions (matches SKRL's timestep counter scale).
-        steps = self.common_step_counter * self.num_envs
-        if steps < 100_000:
+        # Velocity curriculum (policy-step counter; thresholds are in policy steps)
+        # movement_speed_x/yaw_rotation_speed_x sind die einzige Quelle der Wahrheit fuer
+        # die maximale Ziel-Geschwindigkeit (verdrahtet am 10.07.26 — vorher hardcodete
+        # dieser Block eigene Werte bis 1.0 m/s, komplett unabhaengig von der Config;
+        # siehe Session-Log 2026-07-10).
+        steps = self.common_step_counter
+        max_speed = self.cfg.movement_speed_x
+        max_yaw = self.cfg.yaw_rotation_speed_x
+        if steps < 10_000:
+            # Very early: fixed hint at max_speed so "stand still" is never optimal from step 1
             self._commands[env_ids] = 0.0
-        elif steps < 350_000:
-            self._commands[env_ids] = 0.0
-            self._commands[env_ids, 0] = torch.rand(len(env_ids), device=self.device) * 0.5
+            self._commands[env_ids, 0] = max_speed
         else:
-            curriculum_factor = min(1.0, (steps - 350_000) / 700_000)
-            max_vel = 0.3 + curriculum_factor * 0.7   # 0.3 → 1.0 m/s
-            self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(
-                -max_vel, max_vel
+            # Randomization window widens over steps 10k..100k: starts tight around
+            # max_speed, widens down toward 20% of max_speed for command diversity,
+            # then stays there for the rest of training. Always non-zero.
+            progress = min(1.0, (steps - 10_000) / 90_000)
+            min_vel = max_speed * (1.0 - 0.8 * progress)
+            self._commands[env_ids] = 0.0
+            self._commands[env_ids, 0] = (
+                min_vel + torch.rand(len(env_ids), device=self.device) * (max_speed - min_vel)
             )
+            if max_yaw > 0:
+                self._commands[env_ids, 2] = torch.zeros_like(
+                    self._commands[env_ids, 2]
+                ).uniform_(-max_yaw, max_yaw)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]

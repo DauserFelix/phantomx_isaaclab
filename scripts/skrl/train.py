@@ -84,9 +84,6 @@ import gymnasium as gym
 import skrl
 from packaging import version
 
-import skrl
-print(skrl.__version__)
-
 # check for minimum supported skrl version
 SKRL_VERSION = "1.4.3"
 if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
@@ -121,6 +118,17 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 logger = logging.getLogger(__name__)
 
 import phantomx_thesis.tasks  # noqa: F401
+
+# Custom SAC components (all 4 fixes from RSL-RL-SAC paper)
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_models import (
+    PhysicsBoundedActor,
+    SACCritic,
+    compute_action_scaling_direct,
+    get_sac_hidden_dims,
+)
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_memory import NStepMemory
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_agent import CustomSAC
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.timeout_wrapper import TimeoutAwareWrapper
 
 # config shortcuts
 if args_cli.agent is None:
@@ -226,30 +234,119 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     print("=" * 80)
     print("Action space:", env.action_space)
-
     try:
         print("low :", env.action_space.low)
         print("high:", env.action_space.high)
     except Exception as e:
         print(e)
-
-    print("=" * 80)
-
     print("=" * 80)
     print(agent_cfg["models"]["policy"])
     print("=" * 80)
 
-    # configure and instantiate the skrl runner
-    # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    runner = Runner(env, agent_cfg)
+    if algorithm == "sac":
+        # ------------------------------------------------------------------ #
+        #  Custom SAC with all 4 fixes from the RSL-RL-SAC paper              #
+        # ------------------------------------------------------------------ #
+        from skrl.trainers.torch import SequentialTrainer
 
-    # load checkpoint (if specified)
-    if resume_path:
-        print(f"[INFO] Loading model checkpoint from: {resume_path}")
-        runner.agent.load(resume_path)
+        # Fix 4: wrap env to cache pre-reset observations for timeout episodes
+        env = TimeoutAwareWrapper(env)
 
-    # run training
-    runner.run()
+        device = env.device
+        obs_space = env.observation_space
+        act_space = env.action_space
+        num_envs = env.num_envs
+
+        # Read hidden_dims from the YAML instead of hardcoding them, so the network actually
+        # trained always matches what params/agent.yaml (and the PPO path) declare.
+        policy_hidden_dims, critic_hidden_dims = get_sac_hidden_dims(agent_cfg)
+        print(f"[INFO] SAC policy hidden_dims: {policy_hidden_dims}")
+        print(f"[INFO] SAC critic hidden_dims: {critic_hidden_dims}")
+
+        # Fix 1+2: physics-bounded actor with improved weight init
+        action_range, action_bias = compute_action_scaling_direct(env, device)
+        actor_kwargs = dict(
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            action_range=action_range,
+            action_bias=action_bias,
+            hidden_dims=policy_hidden_dims,
+            initial_log_std=agent_cfg["models"]["policy"].get("initial_log_std", -1.9),
+        )
+        policy = PhysicsBoundedActor(**actor_kwargs)
+
+        critic_kwargs = dict(
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            hidden_dims=critic_hidden_dims,
+        )
+        critic_1 = SACCritic(**critic_kwargs)
+        critic_2 = SACCritic(**critic_kwargs)
+        target_critic_1 = SACCritic(**critic_kwargs)
+        target_critic_2 = SACCritic(**critic_kwargs)
+
+        # Fix 3: N-step replay buffer
+        mem_cfg = agent_cfg.get("memory", {})
+        print(f"[INFO] SAC memory: memory_size={mem_cfg.get('memory_size', 500_000)}, "
+              f"num_envs={num_envs}, replacement={mem_cfg.get('replacement', False)}")
+        memory = NStepMemory(
+            memory_size=mem_cfg.get("memory_size", 500_000),
+            num_envs=num_envs,
+            device=device,
+            n_steps=mem_cfg.get("n_steps", 3),
+            discount_factor=agent_cfg["agent"].get("discount_factor", 0.97),
+            replacement=mem_cfg.get("replacement", False),
+        )
+
+        # SAC agent config — pass everything from YAML except class-specific keys
+        agent_dict = {k: v for k, v in agent_cfg["agent"].items()
+                      if k not in ("class", "rewards_shaper_scale")}
+
+        from skrl.resources.preprocessors.torch import RunningStandardScaler
+        agent_dict["observation_preprocessor"] = RunningStandardScaler
+        agent_dict["observation_preprocessor_kwargs"] = {"size": obs_space}
+        agent_dict["state_preprocessor"] = None
+        agent_dict["state_preprocessor_kwargs"] = {}
+
+        agent = CustomSAC(
+            models={
+                "policy": policy,
+                "critic_1": critic_1,
+                "critic_2": critic_2,
+                "target_critic_1": target_critic_1,
+                "target_critic_2": target_critic_2,
+            },
+            memory=memory,
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            cfg=agent_dict,
+        )
+
+        trainer_cfg = agent_cfg.get("trainer", {})
+        trainer_cfg.pop("class", None)
+
+        trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
+
+        if resume_path:
+            print(f"[INFO] Loading model checkpoint from: {resume_path}")
+            agent.load(resume_path)
+
+        trainer.train()
+
+    else:
+        # ------------------------------------------------------------------ #
+        #  All other algorithms (PPO, AMP, IPPO, MAPPO) — standard Runner     #
+        # ------------------------------------------------------------------ #
+        runner = Runner(env, agent_cfg)
+
+        if resume_path:
+            print(f"[INFO] Loading model checkpoint from: {resume_path}")
+            runner.agent.load(resume_path)
+
+        runner.run()
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
 

@@ -1,0 +1,293 @@
+================================================================================
+PHANTOMX HEXAPOD — OBSERVATION & ACTION SPACE ANALYSE
+Isaac Lab DirectRLEnv | SKRL PPO/SAC | 18 DOF | 50 Hz
+================================================================================
+
+
+--------------------------------------------------------------------------------
+SIMULATION TIMING
+--------------------------------------------------------------------------------
+
+  sim.dt      = 1/200 Hz = 0.005 s     (Physik-Step)
+  decimation  = 4                       (Policy lauft jeden 4. Physik-Step)
+  policy_dt   = 0.005 x 4 = 0.020 s   -> 50 Hz
+
+  Die Policy wird also 50x pro Sekunde aufgerufen.
+  step_dt = 0.02 s wird fuer Reward-Skalierung verwendet.
+
+
+================================================================================
+OBSERVATION SPACE — 66 Dimensionen
+================================================================================
+
+KOORDINATENSYSTEM (Body Frame)
+-------------------------------
+
+  x -> vorwaerts (Fahrtrichtung)
+  y -> links
+  z -> oben
+
+  Alle Velocities und der Gravity-Vektor sind in diesem body-fixed frame.
+  Er rotiert MIT dem Roboter — bei Drehung des Roboters rotieren die Werte mit.
+
+
+VOLLSTAENDIGE SLOT-TABELLE
+---------------------------
+
+  Slot     Groesse  Name              Einheit   Wertebereich      Beschreibung
+  -------  -------  ----------------  --------  ----------------  -------------------------
+  [0]      1        lin_vel x         m/s       ca. +/-2.0        Vorwaertsgeschwindigkeit
+  [1]      1        lin_vel y         m/s       ca. +/-1.0        Seitwärtsgeschwindigkeit
+  [2]      1        lin_vel z         m/s       ca. +/-0.5        Vertikalgeschwindigkeit
+  [3]      1        ang_vel x         rad/s     ca. +/-3.0        Roll-Rate
+  [4]      1        ang_vel y         rad/s     ca. +/-3.0        Pitch-Rate
+  [5]      1        ang_vel z         rad/s     ca. +/-3.0        Yaw-Rate
+  [6]      1        gravity x         —         [-1.0, +1.0]      Schwerkraftvektor body frame
+  [7]      1        gravity y         —         [-1.0, +1.0]      (normierter Einheitsvektor,
+  [8]      1        gravity z         —         [-1.0, +1.0]       Roboter gerade: [0, 0, -1])
+  [9]      1        cmd vx            m/s       0.05 .. 1.0       Soll-Vorwaertsgeschwindigkeit
+  [10]     1        cmd vy            m/s       +/-0.6            Soll-Seitwärtsgeschwindigkeit
+  [11]     1        cmd yaw           rad/s     +/-0.6            Soll-Yaw-Drehrate
+  [12-29]  18       joint_pos_rel     rad       [-0.5235, +0.5235] Gelenkwinkel minus Default-Pose
+  [30-47]  18       joint_vel         rad/s     ca. +/-0.8        Gelenkwinkelgeschwindigkeit
+  [48-65]  18       last_actions      —         [-1.0, +1.0]      Vorheriger geclippter Policy-Output
+
+
+GRAVITY-VEKTOR — BEISPIELWERTE
+--------------------------------
+
+  Zustand                    gravity_b
+  -------------------------  ---------------------
+  Roboter gerade stehend     [ 0.0,  0.0, -1.0 ]
+  45 Grad nach vorne geneigt [ 0.7,  0.0, -0.7 ]
+  45 Grad nach links geneigt [ 0.0, -0.7, -0.7 ]
+  90 Grad auf der Seite      [ 0.0,  1.0,  0.0 ]
+  Umgekippt (kopfueber)      [ 0.0,  0.0, +1.0 ]
+
+  Berechnung in Isaac Lab:
+    gravity_b = R_body_from_world.T @ [0, 0, -1]
+
+  Berechnung aus IMU (nur korrekt bei a_body ≈ 0):
+    gravity_b = -a_imu / |a_imu|
+
+  Bessere Methode fuer Gazebo (wenn IMU Quaternion liefert):
+    from scipy.spatial.transform import Rotation
+    q = [msg.orientation.x, msg.orientation.y,
+         msg.orientation.z, msg.orientation.w]
+    rot = Rotation.from_quat(q)
+    gravity_b = rot.inv().apply([0.0, 0.0, -1.0])
+
+
+JOINT-REIHENFOLGE — EXAKT ALPHABETISCH (Isaac Lab Standard)
+------------------------------------------------------------
+
+  Policy-Index  Joint-Name    Typ          Default [rad]
+  ------------  ------------  -----------  -------------
+  [0]           j_c1_lf       coxa LV      0.0
+  [1]           j_c1_lm       coxa LM      0.0
+  [2]           j_c1_lr       coxa LH      0.0
+  [3]           j_c1_rf       coxa RV      0.0
+  [4]           j_c1_rm       coxa RM      0.0
+  [5]           j_c1_rr       coxa RH      0.0
+  [6]           j_thigh_lf    femur LV     0.5
+  [7]           j_thigh_lm    femur LM     0.5
+  [8]           j_thigh_lr    femur LH     0.5
+  [9]           j_thigh_rf    femur RV     0.5
+  [10]          j_thigh_rm    femur RM     0.5
+  [11]          j_thigh_rr    femur RH     0.5
+  [12]          j_tibia_lf    tibia LV     0.5
+  [13]          j_tibia_lm    tibia LM     0.5
+  [14]          j_tibia_lr    tibia LH     0.5
+  [15]          j_tibia_rf    tibia RV     0.5
+  [16]          j_tibia_rm    tibia RM     0.5
+  [17]          j_tibia_rr    tibia RH     0.5
+
+  Abkuerzungen: L=links, R=rechts, V=vorne, M=mitte, H=hinten
+
+
+TRAINING-RAUSCHEN (sim-to-real domain randomization)
+------------------------------------------------------
+
+  Kanal       Standardabweichung  Entspricht
+  ----------  ------------------  ------------------------------------
+  lin_vel     sigma = 0.01 m/s    gutes IMU
+  ang_vel     sigma = 0.01 rad/s  gutes Gyroskop
+  gravity     sigma = 0.01        kleines Orientierungsrauschen
+  jpos_rel    sigma = 0.01 rad    ca. +/-0.57 Grad Encoder-Rauschen
+  jvel        sigma = 0.05 rad/s  hoeher (Differenziation vom Encoder)
+
+  Dieses Rauschen wurde zum Training hinzugefuegt um den Transfer auf reale
+  Sensoren vorzubereiten. Der RunningStandardScaler normiert dennoch auf N(0,1).
+
+
+================================================================================
+ACTION SPACE — 18 Dimensionen
+================================================================================
+
+PIPELINE: POLICY-OUTPUT -> PHYSIK
+-----------------------------------
+
+  Policy-Output (raw float, unbegrenzt, z.B. -40 bis +58 bei schlechter Policy)
+       |
+       v  Step 1: clamp(x, -1.0, +1.0)
+  Geclippte Action  in [-1, 1]
+       |             (wird als last_actions in der NAECHSTEN Obs gespeichert!)
+       v  Step 2: x * action_scale  (action_scale = 0.5)
+  Skalierter Offset  in [-0.5, +0.5] rad
+       |
+       v  Step 3: + default_joint_pos
+  Zielposition  (z.B. femur: 0.5 +/- 0.5 => 0.0 bis 1.0 rad)
+       |
+       v  Step 4: clamp(q_def - joint_pos_limit, q_def + joint_pos_limit)
+  Finale Zielposition  [rad]       joint_pos_limit = 0.5235 rad (= 30 Grad)
+       |
+       v  PD-Regler: Kp=10 Nm/rad, Kd=2 Nm*s/rad
+  Drehmoment  (begrenzt auf 1.5 Nm, Geschwindigkeit auf 0.8 rad/s)
+
+
+ABSOLUTE GELENKGRENZEN NACH PIPELINE
+--------------------------------------
+
+  Gelenk-Typ      Default [rad]   Min [rad]   Max [rad]   Bereich
+  --------------  -------------   ---------   ---------   --------
+  j_c1_*  (coxa)  0.0             -0.5235     +0.5235     +/-30 Grad
+  j_thigh (femur) 0.5             -0.0235     +1.0235     0.5 +/-30 Grad
+  j_tibia (tibia) 0.5             -0.0235     +1.0235     0.5 +/-30 Grad
+
+
+AKTUATOR-PARAMETER (aus phantomx.py)
+--------------------------------------
+
+  Parameter            Wert          Gilt fuer
+  -------------------  ------------  -----------------
+  PD Stiffness (Kp)    10.0 Nm/rad   alle 18 Gelenke
+  PD Damping   (Kd)     2.0 Nm*s/rad alle 18 Gelenke
+  Effort-Limit          1.5 Nm       alle 18 Gelenke
+  Velocity-Limit        0.8 rad/s    alle 18 Gelenke (= ca. 46 Grad/s)
+
+  URDF-Limits (nicht aktiv durch soft_joint_pos_limit_factor=0.9):
+    Joint-Range: +/-2.618 rad (+/-150 Grad)
+    Effort:      2.8 Nm
+    Velocity:    5.655 rad/s
+
+
+LAST_ACTIONS — GENAUE SEMANTIK
+--------------------------------
+
+  Reihenfolge innerhalb eines Policy-Steps in Isaac Lab:
+
+    1. Policy erhaelt obs_t
+    2. Policy gibt action_t aus
+    3. _pre_physics_step(action_t):
+         self._actions = clamp(action_t, -1.0, 1.0)     <- hier wird gespeichert
+         processed = default + 0.5 * self._actions
+    4. Physik-Step laeuft (4x fuer decimation=4)
+    5. _get_observations():
+         obs = [..., self._actions]   <- enthaelt den AKTUELLEN geclippten Output
+
+  -> last_actions[48:65] ist der geclippte Output des AKTUELLEN Steps,
+     nicht des vorherigen.
+
+  Im ROS2-Node muss after dem Publishen gesetzt werden:
+    self.last_actions = np.clip(actions, -1.0, 1.0)   <- KORREKT
+    (nicht davor, nicht nach dem naechsten Sensor-Read)
+
+
+================================================================================
+KRITISCHE SIM-TO-SIM STOLPERSTEINE
+================================================================================
+
+  1. lin_vel_b [0:2]
+     Muss im BODY FRAME sein, nicht world frame.
+     Bei IMU-Integration driftet der Wert uebers Zeit.
+     Empfehlung: Falls Gazebo /odom publisht, direkt nutzen und in
+     body frame transformieren via IMU-Quaternion.
+
+  2. gravity_b [6:8]
+     Bei schneller Beschleunigung/Abbremsung verfaelscht durch Traegheitskraefte.
+     Empfehlung: IMU-Quaternion direkt verwenden statt aus a_imu schaetzen.
+
+  3. joint_pos_rel [12:29]
+     Muss EXAKT pos - default_pos sein.
+     Default-Werte sind fest: coxa = 0.0 rad, femur = tibia = 0.5 rad.
+     Ein falscher Default-Wert erzeugt systematischen Bias in 6 Gelenken.
+
+  4. last_actions [48:65]
+     Bei Initialisierung mit zeros aber Roboter in anderer Startpose
+     gibt es beim ersten Step einen Sprung. Zeros-Initialisierung ist
+     korrekt solange der Roboter auch an der Default-Pose startet.
+
+  5. Joint-Reihenfolge
+     Isaac Lab alphabetisch  ≠  URDF-Reihenfolge  ≠  Gazebo /joint_states
+     Die POLICY_TO_MOTOR / MOTOR_TO_POLICY Maps im ROS2-Node loesen das.
+     Falsche Reihenfolge = Beine machen das was andere Beine sollen.
+
+  6. Velocity-Commands [9:11]
+     Waehrend Training: cmd_vx ist immer > 0.05 (kein Stillstand-Command).
+     Fuer ROS2-Test: cmd = [0.3, 0.0, 0.0] ist ein guter Startwert.
+     cmd = [0.0, 0.0, 0.0] war waehrend Training selten -> unbekanntes Verhalten.
+
+
+================================================================================
+OBSERVATION VEKTOR — PYTHON AUFBAU (ROS2 Node Referenz)
+================================================================================
+
+  obs = np.concatenate([
+      lin_vel_body_frame,      # shape (3,)  [m/s]    body frame, aus IMU
+      ang_vel_body_frame,      # shape (3,)  [rad/s]  body frame, aus IMU
+      gravity_body_frame,      # shape (3,)  [-]      Einheitsvektor, aus IMU
+      velocity_commands,       # shape (3,)  [m/s, m/s, rad/s]
+      joint_pos_relative,      # shape (18,) [rad]    pos - default, POLICY-REIHENFOLGE
+      joint_velocities,        # shape (18,) [rad/s]  POLICY-REIHENFOLGE
+      last_clipped_actions,    # shape (18,) [-]      POLICY-REIHENFOLGE, [-1,1]
+  ])
+  # Gesamt: 3+3+3+3+18+18+18 = 66
+
+
+================================================================================
+ACTION VEKTOR — PYTHON AUFBAU (ROS2 Node Referenz)
+================================================================================
+
+  # Was die Policy ausgibt (nach TorchScript bundle.forward(obs)):
+  raw_actions = bundle(obs_tensor)   # shape (18,), float, unbegrenzt
+
+  # Schritt 1: Clippen
+  clipped = np.clip(raw_actions, -1.0, 1.0)
+
+  # Schritt 2: In Gelenkziele umrechnen (POLICY-Reihenfolge)
+  q_target = DEFAULT_JOINT_POS + 0.5 * clipped
+
+  # Schritt 3: Gelenkgrenzen
+  q_target = np.clip(q_target,
+                     DEFAULT_JOINT_POS - 0.5235,
+                     DEFAULT_JOINT_POS + 0.5235)
+
+  # Schritt 4: In MOTOR-Reihenfolge umordnen
+  q_motor = q_target[MOTOR_TO_POLICY]
+
+  # Schritt 5: Als absolute Gelenkziele publishen [rad]
+  # -> /position_controller/commands  (Float64MultiArray)
+
+  # Schritt 6: last_actions aktualisieren fuer naechsten Step
+  last_actions = clipped
+
+
+================================================================================
+QUELLDATEIEN
+================================================================================
+
+  Observation/Action Definition:
+    source/phantomx_thesis/.../phantomx_thesis_env.py
+    source/phantomx_thesis/.../phantomx_thesis_env_cfg.py
+
+  Robot-Konfiguration (Aktuatoren, Limits, Default-Pose):
+    isaaclab/source/isaaclab_assets/isaaclab_assets/robots/phantomx.py
+
+  ROS2-Interface:
+    ros2_ws/src/phantomx_package/src/phantomx_policy_simulation_interface.py
+
+  Policy-Export:
+    ros2_ws/src/phantomx_package/src/export_policy.py
+    scripts/skrl/export_policy_ros2.py
+
+================================================================================

@@ -1,0 +1,671 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-09
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. PPO — WARUM LERNT DER AGENT EXTREM LANGSAM? (Policy-Std-Explosion)
+--------------------------------------------------------------------------------
+
+Analysiert: train.py, play.py, skrl_ppo_cfg.yaml, phantomx_thesis_env_cfg.py,
+phantomx_thesis_env.py + echte TensorBoard-Logs aus 4 vollständigen PPO-Runs
+(2026-06-10, 06-19, 06-28, 07-09) + skrl-Quellcode (gaussian.py, ppo.py,
+kl_adaptive.py) direkt verifiziert.
+
+HAUPTBEFUND: Policy-Standardabweichung läuft in jedem Run unkontrolliert nach
+oben und bleibt hängen (meist an der harten Obergrenze). Lernt normal für die
+ersten 10-25% des Trainings, danach Plateau oder Verschlechterung.
+
+Konkrete Zahlen (Run 2026-06-28, 512 envs — identische Config wie der Run von
+heute 07-09):
+  Policy/Standard deviation: 1.15 (Step 6k) → 7.389 = exp(max_log_std) ab
+  Step ~54.000, bleibt dort EXAKT konstant bis Step 996.000.
+  Reward: steigt bis Step ~180k auf ~480, dann absolutes Plateau bis Ende.
+  Loss/Entropy loss friert bei genau -0.6154 ein (Bestätigung: Entropie
+  eines 18-dim Gaussians ist bei fixem σ konstant).
+
+Run 2026-06-19 (identische entropy/kl-Config): σ fällt zunächst auf 0.41
+(gut!), kriecht dann wieder hoch auf 1.38 → Reward fällt von Peak 768
+(Step 252k) auf 240 am Ende (-69%).
+
+MECHANISMUS (gegen skrl-Source verifiziert):
+  1. skrl PPO: entropy_loss = -entropy_loss_scale * entropy → Gradient
+     erhöht aktiv σ (ppo.py:406).
+  2. Aktionen werden erst in phantomx_thesis_env.py:92 hart auf [-1,1]
+     geclippt — AUSSERHALB der Distribution. skrl berechnet log_prob/
+     Entropie aber auf dem UNGECLIPPTEN Normal (gaussian.py) → Policy
+     "glaubt" sie exploriert sinnvoll, obwohl bei σ>~2 fast jede Aktion
+     ohnehin bei ±1 landet (reines Rauschen).
+  3. Wachsendes σ → wachsende KL-Divergenz → KLAdaptiveLR
+     (kl_adaptive.py) teilt LR bei jedem Update mit KL>threshold*2 durch
+     1.5 → LR bricht schon bei Step 6000 von 0.001 auf 0.0003 ein.
+  4. Mit gecrashter LR fehlt die Kraft, σ gegen den weiter unopponierten
+     Entropie-Bonus zurückzudrücken → Teufelskreis bis zur Sättigung.
+
+RELEVANTE CONFIG-WERTE (skrl_ppo_cfg.yaml):
+  max_log_std: 2.0 (→ σ bis 7.39 erlaubt), initial_log_std: 0.0 (σ=1.0),
+  entropy_loss_scale: 0.01, kl_threshold: 0.008, clip_actions: False.
+
+EMPFOHLENE FIXES (noch nicht umgesetzt):
+  - max_log_std: 2.0 → 0.0 (σ ≤ 1.0) — härte Obergrenze runter.
+  - initial_log_std: 0.0 → -1.6 bis -1.9 (analog zum SAC-Actor).
+  - entropy_loss_scale: 0.01 → 0.0-0.003 testen.
+  - clip_actions: True setzen (Konsistenz Policy/Env-Clamp).
+  - kl_threshold NACH den obigen Fixes wieder auf ~0.01-0.016 lockern.
+  - TensorBoard-Watchdog: "Policy / Standard deviation" beobachten, bei
+    Annäherung an exp(max_log_std) Lauf abbrechen.
+
+Sekundäre Funde:
+  - termination_tilt = 0.03 (env_cfg.py:311) — Kommentar sagt "≈39°,
+    locker", tatsächlich nur ~10° Neigung bis Termination. Verstärkt
+    das Hauptproblem (mehr Abbrüche bei verrauschten Aktionen).
+  - scene.num_envs = 64 als Default (env_cfg.py:225, Kommentar "PPO:
+    512") — in allen geprüften Runs per CLI --num_envs 512 überschrieben,
+    aber Falle für Runs ohne explizites Flag.
+
+
+--------------------------------------------------------------------------------
+2. SAC — WARUM NOCH LANGSAMER? (randperm-Performance-Bug + Entropie-Kollaps)
+--------------------------------------------------------------------------------
+
+Analysiert: alle Dateien in agents/ (skrl_sac_cfg.yaml, skrl_sac_models.py,
+skrl_sac_memory.py, skrl_sac_agent.py, timeout_wrapper.py) + TensorBoard-Logs
+aus 2 unabhängigen vollständigen SAC-Runs (2026-06-26, 06-29, beide 32 envs,
+aktuelle CustomSAC/NStepMemory-Config) + skrl-Source (random.py).
+
+HAUPTBEFUND: Kein Stabilitätsproblem wie bei PPO, sondern ein massiver
+WALL-CLOCK-PERFORMANCE-BUG. 1M-Step-Run dauerte ~50,7h (Jun29 09:36 →
+Jul1 12:18) statt der zu erwartenden ~7-10h.
+
+Beweis: Stats/Algorithm update time (ms) wächst in BEIDEN Runs von 6.7ms
+(Step 10k) auf ~230ms (ab Step ~560-610k) und bleibt dort — exakt gleiches
+Muster in beiden Runs. Stats/Env stepping time bleibt die GANZE ZEIT
+konstant bei ~14ms → Ursache eindeutig im SAC-Update, nicht der Simulation.
+
+MECHANISMUS: skrl_sac_memory.py:83-86 (NStepMemory.sample(), geerbt von
+skrl RandomMemory) nutzt bei replacement=False (Default, nirgends
+überschrieben) torch.randperm(valid_size) — volle Zufallspermutation über
+den GESAMTEN Buffer (bis memory_size × num_envs = 500.000 × 32 =
+16.000.000 Elemente), nur um davon batch_size=2048 zu behalten. SAC
+updated (anders als PPO) nach JEDEM env.step() (~992.000 Updates/Run) →
+Kosten explodieren mit Buffer-Füllung, Plateau exakt bei Step≈memory_size.
+
+FIX (UMGESETZT, siehe Punkt 4): skrl_sac_cfg.yaml → replacement: True.
+  → torch.randint statt torch.randperm, O(batch_size) statt O(buffer_size).
+  Geschätzt: ~5-7x Wall-Clock-Speedup (→ ~7-10h statt ~51h für 1M Steps).
+  WICHTIG dabei gefunden: train.py baute NStepMemory bisher OHNE
+  "replacement" aus der YAML zu lesen (gleicher Bug-Typ wie hidden_dims,
+  Punkt 3) — mit-gefixt, sonst wäre der YAML-Wert wirkungslos gewesen.
+
+SEKUNDÄRER BEFUND: Coefficient/Entropy coefficient (α) kollabiert von 0.5
+auf ~0.002 bereits innerhalb der ersten 12-20% des Trainings (beide Runs)
+und bleibt dort. Entropie-Bonus trägt >80% des Trainings praktisch nichts
+mehr bei. Nicht zwingend falsch (target_entropy=-18=-dim(A) ist SAC-
+Standard), aber ungewöhnlich schnell — plausibel durch ~24x mehr
+Gradientenschritte pro "Timestep" als PPO (Replay-Ratio/Primacy-Bias-
+Phänomen aus der SAC-Literatur). Beobachten, nicht akut fixen.
+
+KONTEXT (nicht mehr aktuell relevant): Ein alter Run (2026-06-20, 512
+envs, noch mit class:SAC + RandomMemory — VOR den "4 Fixes") ist ab
+Step ~20-100k zu NaN divergiert und blieb 900k+ Steps kaputt. Bestätigt
+im Nachhinein, warum die Custom-SAC-Fixes (tanh-Actor, sicherer Init,
+N-Step, Timeout-Bootstrap) gebaut wurden.
+
+Kleinere Beobachtung: timeout_wrapper.py:26-29 nutzt bei Timeout die
+Beobachtung von Schritt t-1 statt der (von IsaacLab intern schon
+resetteten) echten finalen Beobachtung von Schritt t — dokumentierte
+Näherung, kleiner Bias, niedrige Priorität.
+
+
+--------------------------------------------------------------------------------
+3. VERIFIKATION EINES EXTERNEN FIX-PROMPTS (SAC-Netzwerkarchitektur)
+--------------------------------------------------------------------------------
+
+User hatte einen Prompt aus einer anderen Claude-Session zur Analyse
+vorgelegt: Behauptung, dass SAC die YAML-Netzwerkgröße komplett ignoriert
+(hidden_dims hartkodiert), während PPO korrekt aus der YAML liest.
+
+VERIFIKATION (gegen echten Code + git diff):
+  - Bestätigt korrekt: train.py:270/279 hardcoded hidden_dims=[128, 128]
+    in actor_kwargs/critic_kwargs, unabhängig von der YAML.
+  - Bestätigt korrekt: skrl Runner (PPO-Pfad) liest YAML wirklich korrekt
+    (verifiziert in model_instantiators/torch/common.py:289).
+  - WICHTIGER FUND (git diff): Der komplette Custom-SAC-Code (skrl_sac_
+    agent.py, skrl_sac_memory.py, skrl_sac_models.py, timeout_wrapper.py)
+    ist noch UNCOMMITTED / komplett untracked. Letzter Commit (32f95c7)
+    kennt die "4 Fixes" noch nicht.
+  - WICHTIGER FUND: YAML-Netzwerkgröße wurde bereits (uncommitted) von
+    [128,128] auf [512,256,128] geändert — für PPO UND SAC. Für PPO
+    greift das (Runner liest YAML), für SAC nicht (Hardcoding-Bug) —
+    genau das Szenario, das der externe Prompt beschreibt.
+  - LÜCKE im externen Prompt: play.py hat EXAKT denselben Bug (2 Stellen,
+    play.py:252/256), war aber nicht explizit im Scope. Ohne Fix hätte
+    das Laden eines mit [512,256,128] trainierten Checkpoints in play.py
+    mit Shape-Mismatch gecrasht.
+
+
+--------------------------------------------------------------------------------
+4. UMGESETZTE FIXES DIESER SESSION
+--------------------------------------------------------------------------------
+
+skrl_sac_models.py:
+  Neue Funktionen _extract_layers() und get_sac_hidden_dims() — lesen
+  hidden_dims für Policy + alle 4 Critic-Rollen aus der YAML, mit
+  defensiven Checks (ValueError bei fehlendem/malformtem network/layers,
+  und bei Abweichung zwischen critic_1 und critic_2/target_critic_1/
+  target_critic_2 — Polyak-Update braucht identische Architektur).
+
+train.py (SAC-Zweig):
+  hidden_dims=[128, 128] → get_sac_hidden_dims(agent_cfg), Ergebnis wird
+  geloggt ([INFO] SAC policy/critic hidden_dims: ...).
+
+play.py:
+  Identischer Fix (war im externen Prompt nicht im Scope).
+
+skrl_sac_cfg.yaml:
+  Veralteten Kommentar bei layers:[512,256,128] korrigiert.
+  memory_size: 500000 → 125000 (passend zu num_envs=128, siehe Punkt 5).
+  memory.replacement: True ergänzt (randperm-Fix aus Punkt 2).
+
+train.py (memory-Konstruktion, ~Zeile 293-301):
+  NStepMemory(...) liest jetzt auch "replacement" aus mem_cfg statt es
+  stillschweigend auf dem Default False zu belassen. [INFO]-Logzeile für
+  memory_size/num_envs/replacement ergänzt.
+
+PPO-Pfad (skrl_ppo_cfg.yaml, else-Zweig in train.py/play.py mit
+Standard-Runner): NICHT angefasst.
+
+VERIFIKATION (kein Isaac-Sim/GPU in dieser Sandbox verfügbar):
+  - py_compile auf alle 3 geänderten .py-Dateien → fehlerfrei.
+  - grep nach verbliebenen hidden_dims=[128,128] → keine Treffer mehr.
+  - PPO else-Zweig textuell mit Original verglichen → identisch.
+  - get_sac_hidden_dims()-Logik gegen echte YAML simuliert (PyYAML):
+    liefert [512,256,128] für Policy+Critic, identisch zu PPO-YAML.
+  - Negativ-Tests: critic_2 auf [64,64] verstellt → wirft ValueError wie
+    erwartet. network-Key aus policy entfernt → wirft wie erwartet.
+
+
+--------------------------------------------------------------------------------
+5. NUM_ENVS EMPFEHLUNG (heutige Frage)
+--------------------------------------------------------------------------------
+
+PPO: 512 envs.
+  Bereits mehrfach erfolgreich getestet (Run 2026-06-28: ~4,5h für 1M
+  Steps, konstant ~34min/120k Steps, keine VRAM-Probleme). rollouts=24 ×
+  512 = 12.288 Transitions/Update passt zum YAML-Kommentar. Immer
+  explizit --num_envs 512 übergeben (Code-Default ist 64!).
+
+SAC: 128 envs EMPFOHLEN, aber NUR zusammen mit "replacement: True"
+  (siehe Punkt 2) und memory_size proportional runter (500.000 → ca.
+  125.000), sonst wird der randperm-Bug bei mehr envs noch schlimmer.
+  Begründung: memory_size ist PRO ENV (total = memory_size × num_envs).
+  Bei 512 envs unverändert wären das ~150+ GB Buffer — unrealistisch.
+  128 envs bei memory_size=125.000 hält den Gesamtbuffer bei ~16M
+  Transitions (wie die bisher am besten untersuchten 32-env-Runs), gibt
+  aber 4x mehr/diversere neue Daten pro Wall-Clock-Zeit und senkt die
+  Replay-Ratio (hilft evtl. auch gegen den schnellen Entropie-Kollaps
+  aus Punkt 2). Höher (256) möglich, falls VRAM-Headroom vorhanden —
+  nicht durch Daten abgesichert, als nächsten Schritt testen.
+
+
+--------------------------------------------------------------------------------
+6. GEÄNDERTE DATEIEN DIESER SESSION
+--------------------------------------------------------------------------------
+
+scripts/skrl/train.py
+  → get_sac_hidden_dims() statt hardcoded [128,128], Logging hinzugefügt
+
+scripts/skrl/play.py
+  → identischer Fix wie train.py
+
+source/phantomx_thesis/.../agents/skrl_sac_models.py
+  → _extract_layers(), get_sac_hidden_dims() (neu)
+
+source/phantomx_thesis/.../agents/skrl_sac_cfg.yaml
+  → Kommentar bei layers:[512,256,128] korrigiert
+
+Zusätzlich (Punkt 7, Stehen-statt-Gehen-Fix):
+  skrl_sac_cfg.yaml           → target_entropy: -18.0 → -9.0
+  phantomx_thesis_env_cfg.py  → tripod_gait_reward_scale: 2.0 → 4.0
+  phantomx_thesis_env.py      → Tracking-Kernel /0.25 → /0.1 (lin_vel + yaw_rate)
+
+NICHT geändert (nur analysiert/empfohlen, noch offen):
+  - skrl_ppo_cfg.yaml: max_log_std, initial_log_std, entropy_loss_scale,
+    kl_threshold, clip_actions
+  - phantomx_thesis_env_cfg.py: termination_tilt, scene.num_envs Default
+  - Gesamter uncommitteter Custom-SAC-Stand (weiterhin nicht committed)
+
+
+--------------------------------------------------------------------------------
+7. SAC LERNT NUR STEHEN, NICHT LAUFEN — Analyse + Fix
+--------------------------------------------------------------------------------
+
+Frage: SAC lernt hauptsächlich Stehen statt Gehen. Ursache?
+
+BEWEIS (Episode_Reward/* auf echte Episodenlänge normalisiert, nicht auf
+die feste max_episode_length_s=40 wie im Rohwert — sonst verzerrt durch
+wachsende Überlebenszeit; geprüft in 2 unabhängigen SAC-Runs 06-26/06-29):
+
+  Reward/Step        Step 10k   Step ~230k   Step 1000k   Max
+  foot_contact        0.017      0.020        0.020       0.020  (fast von Anfang an maximal)
+  height_tracking     0.098      0.101        0.100       0.10   (fast von Anfang an maximal)
+  alive                0.006      0.006        0.006       0.006  (immer maximal, fix)
+  tripod_gait          0.019      0.022        0.035       0.04   (nur leichte Verbesserung)
+  track_lin_vel_xy_exp 0.192      0.142        0.048       0.20   (FÄLLT auf 24% des Max!)
+
+→ Policy findet "aufrecht stehen, Füße unten" schon in den ersten paar
+hundert Gradientenschritten (Step 10k = kurz nach learning_starts=8000)
+und bleibt dort. Geschwindigkeits-Tracking wird über das Training SCHLECHTER
+relativ zum Kommando, nicht besser.
+
+URSACHEN (3 sich verstärkende Faktoren):
+  1. Tracking-Kernel exp(-error²/0.25) zu großzügig für kleine Curriculum-
+     Kommandos (0.05-0.3 m/s in den ersten 40% des Trainings) — Stillstehen
+     gibt dort schon 85-96% des Max-Rewards.
+  2. SAC-Entropie kollabiert (Punkt 2) schon bei Step 120-210k — genau als
+     Curriculum-Phase 2 (100k-400k, "muss wirklich vorwärts") anfängt.
+     Exploration ist weg, bevor der Druck zum Laufen einsetzt.
+  3. PhysicsBoundedActor startet bewusst sicher/deterministisch
+     (initial_log_std=-1.9) — kleines Zeitfenster für Exploration, das
+     durch (2) noch schneller zugeht.
+
+Interessanter Kontrast zu PPO (Punkt 1): PPO explodiert in der Entropie
+(zu viel Rauschen, nie kohärent), SAC kollabiert zu früh (zu wenig
+Exploration, bleibt im ersten gefundenen Lokaloptimum "Stehen" hängen).
+Gegensätzliche Symptome, beides Exploration/Entropie-Fehlfunktionen.
+
+FIXES UMGESETZT (auf User-Bestätigung):
+  skrl_sac_cfg.yaml:      target_entropy: -18.0 → -9.0 (weniger negativ,
+                          Exploration bleibt länger erhalten)
+  phantomx_thesis_env_cfg.py: tripod_gait_reward_scale: 2.0 → 4.0 (einziger
+                          Term, der echtes Gehen strukturell von Stehen
+                          unterscheidet)
+  phantomx_thesis_env.py: Tracking-Kernel /0.25 → /0.1 für lin_vel UND
+                          yaw_rate (Zeile ~137-146) — differenziert
+                          Stillstehen klarer von Tracking auch bei
+                          kleinen Kommandos.
+
+WICHTIG: phantomx_thesis_env.py und _env_cfg.py sind SHARED zwischen PPO
+und SAC — Kernel-Fix und tripod_gait_reward_scale wirken auf BEIDE
+Algorithmen, nicht nur SAC. target_entropy ist SAC-spezifisch
+(skrl_sac_cfg.yaml). Noch nicht real trainiert/verifiziert (kein
+Isaac-Sim in dieser Sandbox) — nächster echter Trainingslauf sollte das
+bestätigen.
+
+
+--------------------------------------------------------------------------------
+9. ENTROPY-RE-HEATING-PROMPT — VERIFIKATION (noch NICHT umgesetzt)
+--------------------------------------------------------------------------------
+
+User hatte einen detaillierten Prompt zur Analyse vorgelegt: Entropy
+Re-Heating für CustomSAC (hard/soft-Modus, an Curriculum-Boundaries
+gekoppelt, um den Entropie-Kollaps aus Punkt 7 gezielt gegenzusteuern).
+
+SCHRITT-0-VERIFIKATION (explizit gefordert, gegen echten Quellcode geprüft):
+  common_step_counter (direct_rl_env.py:389) und skrl's Trainer-timestep
+  (sequential.py/base.py: "for timestep in range(cfg.timesteps)") zählen
+  BEIDE exakt 1x pro env.step()-Aufruf, UNABHÄNGIG von num_envs — Zählweisen
+  stimmen überein. Kleiner Nebenbefund: common_step_counter steht zum
+  Zeitpunkt von update(timestep=T) bereits bei T+1 (Inkrement passiert
+  INNERHALB von env.step(), bevor post_interaction/update in derselben
+  Trainer-Iteration läuft) — bei Boundaries ab 10k praktisch irrelevant.
+
+WEITERE FUNDE (im Prompt nicht selbst geprüft):
+  - log_entropy_coefficient ist ein Leaf-Tensor, den entropy_optimizer per
+    Objekt-Referenz hält (sac.py:103-106). "hard"-Reset MUSS per
+    .data/in-place mutieren (torch.no_grad(): ...copy_(...)), sonst verliert
+    der Optimizer die Kopplung und der Reset wirkt nicht.
+  - _target_entropy ist ein reiner Python-Skalar — "soft"-Modus unkritisch.
+  - learning_rate wird von skrl automatisch in ein 3-Tupel (actor/critic/
+    entropy) gebroadcastet (sac_cfg.py:117-118) — kein Problem, nur zur Info.
+  - Schritt 4 des Prompts ("--agent <pfad_zur_neuen_yaml>") funktioniert SO
+    NICHT: --agent muss ein registrierter Gym-Entry-Point-KEY sein
+    (aus __init__.py kwargs-Dict), kein Dateipfad. Neuer Entry Point nötig,
+    z.B. "skrl_sac_reheat_cfg_entry_point".
+  - curriculum_boundaries doppelt (Env-Cfg + Agent-YAML) ist dasselbe
+    Bug-Muster wie hidden_dims/memory.replacement — sollte aus EINER Quelle
+    kommen (env_cfg.curriculum_boundaries, von train.py an agent_dict
+    weitergereicht), nicht zwei unabhängige YAML/Python-Kopien.
+  - Die vom User zitierte "Q1 bis 2e+18"-Historie ist real: Run
+    2026-06-25_23-01-57_sac_torch hatte Q1(max)=2.0165e+18 (noch mit altem
+    class:SAC, vor den 4 Fixes). Vorsicht mit "soft" statt "hard" + Safety-
+    Net ist berechtigt.
+  - WICHTIGSTER PUNKT: Prompt geht von unveränderter Baseline aus — die gibt
+    es nicht mehr (target_entropy in Punkt 7 bereits auf -9.0 geändert,
+    Env-Dateien ebenfalls). User muss entscheiden: neue Reheat-YAML auf
+    aktuellem (bereits modifiziertem) Stand aufbauen, oder Baseline für
+    sauberen A/B-Vergleich zurücksetzen.
+
+STATUS: Empfehlung (mit obigen Korrekturen umsetzen) steht, aber gemäß
+Punkt 10 zurückgestellt — nicht gleichzeitig mit den noch unverifizierten
+Änderungen aus Punkt 7 einführen.
+
+
+--------------------------------------------------------------------------------
+10. "HABEN WIR ZU VIEL MODIFIZIERT?" — TIEFENANALYSE
+--------------------------------------------------------------------------------
+
+User-Sorge: bisherige SAC-Trainings liefern nur "Müll", evtl. weil zu viel
+gleichzeitig verändert wird. Geprüft anhand git log + vollständigem
+uncommitted diff.
+
+BEFUND AUS DER COMMIT-HISTORIE (bestätigt das Muster, aber historisch):
+  "sac trained for 7h but the results were trash" / "still no trianing
+  progress" / "cant train a usefull model" — wiederkehrend über Monate.
+  ABER: Der komplette Custom-SAC-Rahmen (4 Fixes) ist bis heute NIE
+  committed worden — die meisten "trash"-Runs liefen noch OHNE ihn,
+  inkl. des Runs mit der Q1=2e+18-Divergenz. Die aktuelle Architektur lief
+  also gar nicht so lange "zu viel modifiziert" wie die Historie suggeriert.
+
+EINORDNUNG DER HEUTIGEN 6 GLEICHZEITIGEN ÄNDERUNGEN:
+  1. hidden_dims YAML-Konsistenz       → Bugfix, kein Tuning, behalten
+  2. memory.replacement Wiring         → Bugfix, kein Tuning, behalten
+  3. Netzwerkgröße [128,128]→[512,256,128] → NICHT von mir empfohlen, war
+     schon vor meiner ersten Analyse im Working Tree, keiner der
+     historisch untersuchten Runs (auch nicht die besseren) nutzte sie,
+     erhöht Rechenkosten/Schritt zusätzlich (relevant wegen Punkt 2/
+     randperm) — am wenigsten begründete, teuerste Änderung.
+  4. target_entropy -18→-9             ┐
+  5. tripod_gait_reward_scale 2.0→4.0  ├─ ein zusammenhängendes Maßnahmen-
+  6. Tracking-Kernel /0.25→/0.1        ┘  paket gegen "Stehen statt Gehen"
+
+EMPFEHLUNG: Nicht die Custom-SAC-Architektur zurückbauen (sie behebt ein
+real aufgetretenes, katastrophales Problem — Q1-Divergenz). Stattdessen:
+  1. Bugfixes #1/#2 behalten.
+  2. Netzwerkgröße für den NÄCHSTEN Testlauf zurück auf [128,128] — nimmt
+     die unbegründetste/teuerste Variable raus, bleibt vergleichbar mit
+     allen bisher analysierten Runs.
+  3. #4-6 (Stehen-vs-Gehen-Paket) in EINEM kurzen Testlauf (~100-200k
+     Steps, nicht volle 1M) verifizieren. Prüfkriterium: bleibt
+     track_lin_vel_xy_exp/Step stabil/steigt es (statt wie in Punkt 7 auf
+     24% des Max abzufallen)? Bleibt Stats/Algorithm update time flach
+     (Beweis für replacement:True)?
+  4. Entropy-Reheating (Punkt 9) erst NACH einem positiven Ergebnis aus
+     (3) als eigenen, isolierten nächsten Schritt einführen.
+  5. Danach ggf. Netzwerkgröße wieder als eigenes Experiment hochsetzen.
+
+STATUS: UMGESETZT — skrl_sac_cfg.yaml: alle 5 network-Blöcke (policy,
+critic_1, critic_2, target_critic_1, target_critic_2) zurück auf
+[128, 128]. Bewusst NUR SAC betroffen — skrl_ppo_cfg.yaml bleibt bei
+[512,256,128] (kein PPO-Testlauf unmittelbar geplant, PPO-Fixes aus
+Punkt 1 stehen ohnehin noch aus). Verifiziert per PyYAML-Dry-Run: alle
+5 SAC-Blöcke konsistent [128,128], get_sac_hidden_dims()-Konsistenzcheck
+würde nicht mehr feuern, PPO-YAML unverändert bei [512,256,128].
+
+
+--------------------------------------------------------------------------------
+11. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. git commit des aktuellen Standes (Custom-SAC-Framework + heutige Fixes)
+   — bisher nur auf Wunsch, noch nicht ausgeführt.
+2. PPO-Fixes aus Punkt 1 anwenden und Kurz-Testlauf fahren.
+3. SAC künftig IMMER mit --num_envs 128 starten (memory_size=125000 ist
+   jetzt genau darauf abgestimmt — bei abweichendem num_envs neu skalieren:
+   memory_size ≈ 16.000.000 / num_envs).
+4. Netzwerkgröße auf [128,128] zurückgesetzt (Punkt 10) — ERLEDIGT, nur
+   skrl_sac_cfg.yaml betroffen, PPO-YAML bewusst unverändert.
+5. Gestufter Testplan aus Punkt 10: JETZT ist der nächste sinnvolle Schritt
+   der kurze Testlauf (~100-200k Steps) mit dem Stehen-vs-Gehen-Paket +
+   [128,128]-Netz + randperm-Fix, bevor Reheating (Punkt 9) oder ein
+   größeres Netz einzeln nachgelegt werden.
+
+STARTBEFEHL FÜR DEN DIAGNOSE-TESTLAUF (heute vorbereitet):
+  skrl_sac_cfg.yaml: trainer.timesteps 1000000 -> 200000 (nur für diesen
+  Testlauf, write_interval/checkpoint_interval "auto" skalieren automatisch
+  mit: write alle 2000, checkpoint alle 20000 Steps). WICHTIG: vor dem
+  nächsten VOLLEN Lauf timesteps wieder auf 1000000 zurücksetzen.
+  --max_iterations funktioniert NICHT mit SAC (agent_cfg["agent"]["rollouts"]
+  existiert nur bei PPO -> KeyError), daher die YAML-timesteps-Anpassung.
+
+  cd /workspace/projects/phantomx_thesis
+  /workspace/isaaclab/isaaclab.sh -p scripts/skrl/train.py \
+    --task Template-Phantomx-Thesis-Direct-v0 \
+    --algorithm SAC \
+    --num_envs 128 \
+    --headless
+
+  Kein --agent nötig (Default-Resolution zeigt bereits auf die gerade
+  bearbeitete skrl_sac_cfg.yaml). Prüfkriterium in TensorBoard: bleibt
+  Episode_Reward/track_lin_vel_xy_exp (auf Episodenlänge normalisiert)
+  stabil/steigt es, statt wie im Baseline-Run auf 24% des Max abzufallen?
+  Bleibt Stats/Algorithm update time flach (~<20ms)?
+
+
+--------------------------------------------------------------------------------
+12. TORQUE- VS. ACCELERATION-PENALTY — Diskussion + Fix
+--------------------------------------------------------------------------------
+
+Frage: Macht Torque-Penalty überhaupt Sinn, wenn reale Motoren immer 100%
+Drehmoment verfügbar haben? Joint-Acceleration-Penalty existierte schon
+(dof_acc_l2, joint_accel_reward_scale) — User dachte zunächst, es gäbe nur
+Torque. Klargestellt: beide existieren bereits parallel.
+
+ERKENNTNIS (User-Einwand war berechtigt, Empfehlung entsprechend revidiert):
+  - Torque (~1. Ableitung, prop. zu Positionsfehler) unterscheidet NICHT
+    zwischen notwendigem Kraftaufwand (schnelles Gehen, WOLLEN wir) und
+    unnötigem Zittern (wollen wir NICHT) — bestraft beides gleich.
+  - Acceleration (2. Ableitung) ist schärferer Proxy: ein Ziel-Sprung
+    erzeugt einen riesigen Accel-Spike (Δv über nur 0.02s), ein smoother
+    schneller Gang mit hohem aber gleichmäßigem Torque nicht. Trifft das
+    dokumentierte Ruckeligkeits-Problem (25 rad/s Sprünge, Session-Log
+    2026-07-01) direkter als Torque.
+  - ABER empirisch: beide Terme lagen in echten Logs bei ~-0.0002 bis
+    -0.0003/Schritt — verschwindend klein gegen track_lin_vel (~0.05-0.2).
+    Rausschmeißen/Reduzieren von Torque allein löst das "Steht-statt-Geht"-
+    Problem nicht spürbar, ist eher Reward-Design-Sauberkeit als großer Hebel.
+  - Torque komplett auf 0 hätte eine Lücke: konstante hohe Last bei ~Null
+    Beschleunigung (z.B. ungünstige statische Haltung) würde unbestraft
+    bleiben. Daher: abschwächen, nicht auf 0.
+  - joint_accel_reward_scale war mit -2.5e-7 so klein, dass selbst
+    worst-case Jerk-Werte (alle Gelenke springen gleichzeitig ans
+    velocity_limit) nur ~0.00005/Schritt Strafe ergäben — praktisch
+    wirkungslos. Musste hochgesetzt werden, um überhaupt eine Rolle zu
+    spielen.
+
+FIX UMGESETZT (phantomx_thesis_env_cfg.py:255-261, SHARED zwischen PPO
+und SAC):
+  joint_torque_reward_scale: -2e-5 -> -5e-6   (4x abgeschwächt, nicht 0)
+  joint_accel_reward_scale:  -2.5e-7 -> -2.5e-6  (10x hochgesetzt)
+  Beides Startwerte — via Episode_Reward/dof_torques_l2 und
+  Episode_Reward/dof_acc_l2 in TensorBoard beobachten und nachjustieren.
+
+VERIFIKATION: py_compile fehlerfrei, Werte an erwarteter Stelle bestätigt.
+NICHT in den bereits vorbereiteten Diagnose-Testlauf (Punkt 11) eingeplant
+gewesen, wurde aber auf expliziten Wunsch DIREKT mit umgesetzt statt
+zurückgestellt -> zusätzliche Variable im nächsten Testlauf, bewusst in
+Kauf genommen. Kein echter Trainingslauf zur Bestätigung in dieser
+Sandbox möglich.
+
+
+--------------------------------------------------------------------------------
+13. PPO-RUN 2026-07-09_23-18-11 ANALYSIERT (Screenshots) — bestätigt Punkt 1 erneut
+--------------------------------------------------------------------------------
+
+User zeigte TensorBoard-Screenshots eines frisch abgeschlossenen PPO-Runs
+(512 envs, ~4h49min für 996k Steps). Gegen echte Logs verifiziert statt nur
+Pixel gelesen: Config zeigt heutige Reward-Fixes (Torque -5e-6, Accel
+-2.5e-5) SIND drin, aber die PPO-Entropie-Fixes aus Punkt 1
+(max_log_std/initial_log_std/entropy_loss_scale) NIE angewendet.
+
+BESTÄTIGT (3. Mal): Policy/Standard deviation 1.15 (Step 6k) -> 7.3891 =
+exp(2.0) ab Step 114k, exakt konstant bis 996k. Entropy loss eingefroren
+bei -0.6154. LR gecrasht auf 0.0001.
+
+NEU, schlimmer als vorherige Runs: Reward/Total reward (mean) faellt von
+Peak 183.8 (Step 336k) auf -35.4 (Step 996k) — NEGATIV. Vermutlich weil
+der heute geschärfte Kernel (/0.1) eine durch Std-Explosion ohnehin
+verrauschte Policy zusätzlich hart bestraft.
+
+Weitere neue Funde:
+  - Episode/Total timesteps (min) = 1.0, komplett flach über alle 996k
+    Steps — mind. eine der 512 Envs stirbt jeden Reset sofort im ersten
+    Schritt, nie verbessert. Separates Problem, noch zu untersuchen.
+  - movement_penalty faellt monoton 0 -> -3.94, nie Erholung.
+  - dof_acc_l2 mit neuer Scale jetzt ~-0.07/Schritt (umgerechnet) — 6-7x
+    groesser als der verbliebene Tracking-Reward. Bestaetigt Sorge aus
+    Punkt 12, dass die Scale evtl. zu stark hochgesetzt wurde.
+  - tripod_gait einzige Kurve, die NICHT abfällt (haelt sich bei 0.55-0.67
+    ab Step 336k) — Gangmuster übersteht Rauschen besser als Tempo-Tracking.
+
+STATUS: PPO-Fixes aus Punkt 1 weiterhin nicht umgesetzt, jetzt mit
+drittem Beleg für Dringlichkeit.
+
+
+--------------------------------------------------------------------------------
+14. MOVEMENT_SPEED_X / YAW_ROTATION_SPEED_X — totes Config-Feld gefunden + gefixt
+--------------------------------------------------------------------------------
+
+User bemerkte (per IDE-Selection): movement_speed_x/yaw_rotation_speed_x
+sehen aus wie aktive Curriculum-Parameter, das Curriculum in _reset_idx()
+hardcoded aber komplett eigene Werte (0.05/0.25/0.30/0.60/1.0). Verifiziert
+per Grep über gesamtes Projekt: beide Felder werden NIRGENDS sonst
+gelesen — komplett totes Config-Feld, derselbe Bug-Typ wie hidden_dims
+(Punkt 3) und memory.replacement (Punkt 2). Kommentar "10 cm/s" passte
+zudem nicht mal zum Wert 0.05 (= 5 cm/s) — Kommentar war vom alten Wert
+0.10 stehengeblieben.
+
+USER-WUNSCH: Roboter soll maximale Geschwindigkeit von 5 cm/s lernen,
+gesteuert über movement_speed_x als einzige Quelle der Wahrheit.
+
+AUDIT ausserdem gefunden (User bat um ausführliche Suche nach weiteren
+Reward-Fehlern):
+  - KRITISCH: has_forward_command = command_speed.abs() > 0.05 (env.py:186)
+    war hardcodiert exakt auf den Wert, den movement_speed_x jetzt als
+    OBERGRENZE bekommt. Ohne Fix waere movement_penalty komplett
+    stillgelegt worden, sobald Kommandos nie mehr ueber 0.05 gehen können
+    — waere ein NEUER, durch den Wunsch selbst ausgelöster Bug gewesen.
+  - termination_height=0.07, Kommentar sagte "< 10cm" (stale).
+  - termination_tilt=0.05, Kommentar sagte "~39° Neigung" (stimmt nur für
+    das nie genutzte 0.40; bei 0.05 sind es ~12.9°).
+  - self._has_stood_up: deklariert und bei jedem Reset zurückgesetzt,
+    aber nirgends gelesen oder auf True gesetzt — toter State, vermutlich
+    Rest eines entfernten Features. Nicht angefasst (niedrige Prioritaet).
+
+WICHTIGE, NICHT SELBST ENTSCHIEDENE KONSEQUENZ: Bei movement_speed_x=0.05
+sind ALLE Kommandos im Training <=5cm/s. Der Tracking-Kernel (/0.1, aus
+Punkt "Stehen-statt-Gehen"-Fix) gibt Stillstehen bei einem 0.05-Kommando
+weiterhin 97.5% des Max-Rewards (exp(-0.05²/0.1)) — die Steht-statt-Geht-
+Problematik kommt bei so kleinem Zielbereich durch die Hintertür zurück,
+unabhängig von der Kernel-Breite. Um das messbar zu trennen, müsste die
+Kernel-Breite auf ca. 0.003-0.01 (statt 0.1) runter. NICHT umgesetzt,
+da eigene Entscheidung noetig — tripod_gait traegt bei diesem kleinen
+Zielbereich die Hauptlast, Gehen von Stehen zu unterscheiden.
+
+FIX UMGESETZT:
+  env_cfg.py:240-244   movement_speed_x/yaw_rotation_speed_x Kommentare
+                        aktualisiert (jetzt aktiv, nicht mehr tot)
+  env_cfg.py:317-318   termination_height/tilt Kommentare korrigiert
+  env.py:186-189       has_forward_command Schwelle relativ zu
+                        movement_speed_x statt hardcodiert 0.05
+  env.py:269-291       Curriculum komplett neu: 2 Phasen statt 4
+                        (steps<10_000: fix bei max_speed; danach:
+                        randomisiertes Fenster [20%,100%] von max_speed,
+                        Fenster weitet sich ueber Steps 10k-100k). Alte
+                        4-Phasen-Struktur (hardcoded bis 1.0 m/s) ergab
+                        bei 20x kleinerer Obergrenze keinen Sinn mehr
+                        (.clamp(0.1, max_vel) waere mit max_vel=0.05 ein
+                        ungueltiger Bereich gewesen). yaw_rotation_speed_x
+                        wird mit eingebaut, ist aber bei 0.0 aktuell inert
+                        -> Yaw-Kommandos, die die ALTE Phase 4 (ab Step
+                        400k) noch gab, entfallen jetzt komplett.
+
+VERIFIKATION: py_compile fehlerfrei (kein Torch/CUDA in dieser Sandbox,
+daher Curriculum-Arithmetik separat in reinem Python durchgerechnet):
+Kommandos bleiben durchgehend in [0, 0.05], has_forward_command-Schwelle
+(0.005) liegt sicher unter dem kleinsten je vorkommenden Kommando (0.01
+bei vollem Ramp) — Check bleibt aktiv, nicht tot.
+
+
+--------------------------------------------------------------------------------
+15. KONSISTENZ-CHECK: OBSERVATION / MOVEMENT_PENALTY / CURRICULUM / COMMAND
+--------------------------------------------------------------------------------
+
+Drei Fragen des Users, alle gegen den aktuellen (nach Punkt 14 gefixten)
+Code verifiziert:
+
+1. Forward-Command Teil der Observation? JA — self._commands (alle 3 Dim)
+   liegt an Obs-Index 9-11 von 66 (env.py:114-125). Muss so sein, sonst
+   wüsste die Policy nicht, welche Geschwindigkeit verlangt ist.
+
+2. Passt die Kette zusammen? JA, jetzt konsistent: movement_speed_x (Cfg)
+   -> self._commands (Curriculum in _reset_idx) -> Observation UND Reward
+   (track_lin_vel_xy_exp, movement_penalty) — eine einzige Quelle der
+   Wahrheit, keine zweite hardcodierte Kopie mehr.
+   WICHTIGER QUANTITATIVER PUNKT: movement_penalty's Maximalwert ist durch
+   die neue kleine Obergrenze (0.05 statt vorher bis 1.0) von 0.2/Schritt
+   auf 0.01/Schritt geschrumpft (20x) — sein relativer Einfluss im
+   Gesamt-Reward ist entsprechend kleiner geworden. track_lin_vel_xy_exp's
+   Maximalwert (0.2/Schritt bei perfektem Tracking) bleibt unveraendert,
+   da unabhaengig von der Kommando-Groesse. Verstaerkt die in Punkt 14
+   schon notierte Sorge (Steht-statt-Geht bei kleiner Zielgeschwindigkeit).
+   has_forward_command ist mit dem neuen Curriculum praktisch immer wahr
+   (kleinstes Kommando 0.01 > Schwelle 0.005) — Gate faktisch immer aktiv,
+   bleibt aber als Absicherung fuer kuenftige Curriculum-Aenderungen sinnvoll.
+
+3. Wie wird "Gehen" gemessen? Kein einzelnes Signal — Kombination aus
+   track_lin_vel_xy_exp+movement_penalty (tatsaechliche Geschwindigkeit
+   trifft Kommando), tripod_gait (Gangmuster/Alternierung), foot_contact
+   (Mindest-Stabilitaet, unterscheidet nicht Stehen/Gehen), lazy_legs
+   (Ausschluss von Degeneration). Zuverlaessigste Methode: tripod_gait UND
+   track_lin_vel_xy_exp GEMEINSAM in TensorBoard beobachten (beide muessen
+   gesund sein) — genau das hat die PPO-Screenshot-Analyse (Punkt 13)
+   gezeigt (tripod_gait haelt sich, track_lin_vel_xy_exp bricht ein).
+   Vorschlag (noch nicht umgesetzt): zurueckgelegte Strecke pro Episode
+   als reine Logging-Metrik (kein Reward) fuer eine eindeutige, direkte
+   Messung ohne Umweg ueber Proxy-Terms.
+
+
+--------------------------------------------------------------------------------
+16. TARGET_BASE_HEIGHT GEOMETRISCH VERIFIZIERT — moegliche Sofort-Tod-Falle
+    beim Spawn gefunden (wichtiger Fund)
+--------------------------------------------------------------------------------
+
+User bat um Pruefung, ob target_base_height (gerade von 0.20 auf 0.17
+geaendert) sinnvoll ist. Gegen die URDF-Geometrie verifiziert (nicht nur
+Kommentare geglaubt) — full_phantom_isaacsim.urdf gefunden und exakte
+Gelenk-Origins gelesen:
+
+  base_link spawnt bei z=0.18            (phantomx.py:55)
+  MP_BODY = base_link + 0.10             (URDF j_phantomx_attachment:
+                                          <origin xyz="0 0 0.1"/>, exakt
+                                          bestaetigt den env.py-Kommentar
+                                          "10cm above base_link")
+  -> MP_BODY spawnt exakt bei z=0.28
+
+STALE KOMMENTAR (wie schon mehrfach diese Session): target_base_height
+sagt "~20cm above ground" im Kommentar, Wert ist jetzt 0.17 (~17cm).
+
+WICHTIGER FUND — knappe Marge zur oberen Todesgrenze:
+  Spawn (MP_BODY): 0.28  vs.  obere Todesgrenze (env.py:244, hardcodiert
+  0.30, kein benanntes Cfg-Feld): nur 0.02 m Marge BEIM SPAWN SELBST.
+  Zum Vergleich: Marge vom Ziel (0.17) zur oberen Grenze waere 0.13 m —
+  das Problem ist spezifisch der Spawn-Moment, nicht der eingeschwungene
+  Zustand.
+  Dazu kommt in _reset_idx(): default_root_state[:, 2] += randn()*0.01 —
+  bei 3-Sigma-Ausreissern (~±0.03) kann MP_BODY schon beim Spawn ueber
+  0.30 rutschen, BEVOR die Physik die Beine unter Last einsinken lassen
+  konnte.
+
+VERMUTETE VERBINDUNG zu Punkt 13: Episode/Total timesteps (min)=1.0 war
+im PPO-Run komplett flach ueber alle 996k Steps — mind. eine Env stirbt
+jeden Reset sofort im ersten Schritt, nie verbessert. Passt exakt zu
+dieser Spawn/Todesgrenzen-Kollision: ein konstanter Hintergrund-Anteil
+an Pech-Spawns, kein Trainingsproblem.
+
+NICHT verifizierbar ohne echten Sim-Lauf: ob 0.17 exakt der korrekten
+natuerlichen Stehhoehe bei Default-Pose (thigh=0.5, tibia=0.5) entspricht
+– dafuer waere vollstaendige Vorwaertskinematik durch mehrere rotierte
+URDF-Gelenke noetig, nicht per Hand ueberschlagen um falsche Praezision
+zu vermeiden. Empfehlung: Roboter spawnen, Beine auf Default-Pose halten,
+ein paar Physik-Schritte laufen lassen, MP_BODY-Hoehe empirisch ablesen.
+
+EMPFOHLENE FIXES (auf Bestaetigung, noch NICHT umgesetzt):
+  1. Kommentar bei target_base_height korrigieren ("~20cm" -> "~17cm").
+  2. Obere Todesgrenze (aktuell hardcodiert 0.30 in env.py:244) anheben
+     (z.B. auf 0.35) ODER Reset-Randomisierung (randn()*0.01) reduzieren,
+     um die vermutete Sofort-Tod-Falle beim Spawn zu entschaerfen.
+
+================================================================================

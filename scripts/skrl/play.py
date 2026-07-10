@@ -116,6 +116,23 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import phantomx_thesis.tasks  # noqa: F401
 
+# Custom SAC components (Fixes 1-4 from RSL-RL-SAC paper)
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_models import (
+    PhysicsBoundedActor,
+    SACCritic,
+    compute_action_scaling_direct,
+    get_sac_hidden_dims,
+)
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_agent import CustomSAC
+from skrl.resources.preprocessors.torch import RunningStandardScaler
+
+_SKRL_PREPROCESSORS = {
+    "RunningStandardScaler": RunningStandardScaler,
+}
+
+# Map custom agent class names back to their base algorithm so the config entry point resolves.
+_CUSTOM_CLASS_TO_ALGORITHM = {"CUSTOMSAC": "SAC"}
+
 # If an explicit checkpoint is given but no algorithm was specified, auto-detect from the
 # checkpoint's saved params/agent.yaml so the correct model architecture is loaded.
 if args_cli.checkpoint and args_cli.algorithm == "PPO" and args_cli.agent is None:
@@ -127,6 +144,8 @@ if args_cli.checkpoint and args_cli.algorithm == "PPO" and args_cli.agent is Non
     if os.path.exists(_params_yaml):
         with open(_params_yaml) as _f:
             _saved_class = _yaml.safe_load(_f).get("agent", {}).get("class", "PPO").upper()
+        # Normalize custom subclass names to the base algorithm name
+        _saved_class = _CUSTOM_CLASS_TO_ALGORITHM.get(_saved_class, _saved_class)
         if _saved_class != "PPO":
             print(f"[INFO] Auto-detected algorithm '{_saved_class}' from checkpoint params. Overriding --algorithm.")
             args_cli.algorithm = _saved_class
@@ -213,18 +232,65 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`
 
-    # configure and instantiate the skrl runner
-    # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
     experiment_cfg["trainer"]["close_environment_at_exit"] = False
-    experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
-    experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
-    runner = Runner(env, experiment_cfg)
+    experiment_cfg["agent"]["experiment"]["write_interval"] = 0
+    experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0
+
+    if algorithm == "sac":
+        # Instantiate custom SAC models so checkpoint weights load correctly
+        device = env.device
+        obs_space = env.observation_space
+        act_space = env.action_space
+        num_envs = env.num_envs
+
+        # Read hidden_dims from the YAML instead of hardcoding them — must match whatever
+        # architecture the loaded checkpoint was actually trained with (see train.py).
+        policy_hidden_dims, critic_hidden_dims = get_sac_hidden_dims(experiment_cfg)
+        print(f"[INFO] SAC policy hidden_dims: {policy_hidden_dims}")
+        print(f"[INFO] SAC critic hidden_dims: {critic_hidden_dims}")
+
+        action_range, action_bias = compute_action_scaling_direct(env, device)
+        policy = PhysicsBoundedActor(
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            action_range=action_range,
+            action_bias=action_bias,
+            hidden_dims=policy_hidden_dims,
+            initial_log_std=experiment_cfg["models"]["policy"].get("initial_log_std", -1.9),
+        )
+        critic_kwargs = dict(observation_space=obs_space, action_space=act_space,
+                             device=device, hidden_dims=critic_hidden_dims)
+        play_agent = CustomSAC(
+            models={
+                "policy": policy,
+                "critic_1": SACCritic(**critic_kwargs),
+                "critic_2": SACCritic(**critic_kwargs),
+                "target_critic_1": SACCritic(**critic_kwargs),
+                "target_critic_2": SACCritic(**critic_kwargs),
+            },
+            memory=None,
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            cfg={
+                k: (
+                    _SKRL_PREPROCESSORS[v] if k.endswith("_preprocessor") and isinstance(v, str) and v in _SKRL_PREPROCESSORS
+                    else {"size": obs_space, "device": device} if k == "observation_preprocessor_kwargs"
+                    else {} if k.endswith("_kwargs") and v is None
+                    else v
+                )
+                for k, v in experiment_cfg["agent"].items()
+                if k not in ("class", "rewards_shaper_scale")
+            },
+        )
+    else:
+        runner = Runner(env, experiment_cfg)
+        play_agent = runner.agent
 
     print(f"[INFO] Loading model checkpoint from: {resume_path}")
-    runner.agent.load(resume_path)
-    # set agent to evaluation mode
-    # runner.agent.set_running_mode("eval")
-    runner.agent.training = False
+    play_agent.load(resume_path)
+    play_agent.training = False
 
     # reset environment
     obs, _ = env.reset()
@@ -237,7 +303,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         with torch.inference_mode():
 
             # agent stepping
-            outputs = runner.agent.act(obs, None, timestep=timestep, timesteps=timestep)
+            outputs = play_agent.act(obs, None, timestep=timestep, timesteps=timestep)
             # - multi-agent (deterministic) actions
             if hasattr(env, "possible_agents"):
                 actions = {a: outputs[-1][a].get("mean_actions", outputs[0][a]) for a in env.possible_agents}

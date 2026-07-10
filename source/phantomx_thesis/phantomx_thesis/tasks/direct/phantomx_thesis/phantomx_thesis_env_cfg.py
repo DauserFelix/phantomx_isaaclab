@@ -236,9 +236,12 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.20    # MP_BODY at normal standing height (~20cm above ground)
-    movement_speed_x = 0.10      # 10 cm/s — Wert aus funktionierendem Modell (21.04.)
-    yaw_rotation_speed_x = 0.0   # 0 rad/s
+    target_base_height = 0.17    # MP_BODY at normal standing height (~17cm above ground)
+    movement_speed_x = 0.05      # 5 cm/s — maximale Vorwärts-Zielgeschwindigkeit. Einzige Quelle der
+                                  # Wahrheit fürs Geschwindigkeits-Curriculum in _reset_idx() (verdrahtet
+                                  # am 10.07.26, war vorher totes Config-Feld — siehe Session-Log)
+    yaw_rotation_speed_x = 0.0   # rad/s — maximale Yaw-Zielrate. 0.0 = keine Yaw-Kommandos im Curriculum.
+                                  # Einzige Quelle der Wahrheit, siehe movement_speed_x
 
     # =====================================================
     # REWARD SCALES - TUNED FOR HEXAPOD LOCOMOTION
@@ -252,8 +255,14 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # 🚫 PENALTIES (negative)
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -5
-    joint_torque_reward_scale = -2e-5
-    joint_accel_reward_scale = -2.5e-7
+    joint_torque_reward_scale = -5e-6    # war -2e-5 — deutlich abgeschwächt, nicht auf 0:
+                                          # bestraft nicht zwischen notwendigem Kraftaufwand
+                                          # (schnelles Gehen) und Zittern, siehe Session-Log 2026-07-09
+    joint_accel_reward_scale = -2.5e-5   # war -2.5e-7 — übernimmt Hauptrolle für "Smoothness"
+                                          # (schärferer Proxy für Ruckartigkeit als Torque, Faktor 10
+                                          # hochgesetzt; vorher praktisch wirkungslos selbst bei
+                                          # Extremwerten). Startwert — via Episode_Reward/dof_acc_l2
+                                          # in TensorBoard beobachten und ggf. nachjustieren.
     action_rate_reward_scale = -0.02
     flat_orientation_reward_scale = -3.0
 
@@ -307,5 +316,6 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
-    termination_height = 0.10    # MP_BODY < 10cm → kollabiert
-    termination_tilt = 0.40     # gx²+gy² > 0.40 → ~39° Neigung — locker für SAC Early Training
+    termination_height = 0.07    # MP_BODY < 7cm → kollabiert
+    termination_tilt = 0.06     # gx²+gy² > 0.06 → ~14.2° Neigung — Wert aus früherem funktionierendem
+                                 # Modell, dort kombiniert mit initial_log_std=-2.0 (siehe Session-Log)
