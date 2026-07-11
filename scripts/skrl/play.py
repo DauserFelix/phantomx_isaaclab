@@ -188,6 +188,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
+    # Force the velocity curriculum (_apply_velocity_curriculum in phantomx_thesis_env.py) into
+    # its mature stage. A freshly created env always starts common_step_counter at 0
+    # (isaaclab/envs/direct_rl_env.py) — it is *not* restored from the checkpoint. Without this
+    # override, the robot would be commanded to stand still (PPO: steps < 100k) or receive only
+    # the SAC curriculum's very early hint for virtually the entire play session, regardless of
+    # how far the loaded checkpoint was actually trained — the policy barely saw that command
+    # regime after the early training phase, so it looks "weird" even though the checkpoint
+    # itself is fine. 1_000_000 clears both curricula's maturity thresholds (350k / 100k).
+    env.unwrapped.common_step_counter = 1_000_000
+
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)

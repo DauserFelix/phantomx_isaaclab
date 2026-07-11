@@ -213,9 +213,9 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.15    # MP_BODY at normal standing height (~20cm above ground)
+    target_base_height = 0.12    # MP_BODY at normal standing height (~20cm above ground)
     movement_speed_x = 0.07      # 7 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.07 m/s)
-    yaw_rotation_speed_x = 0.2   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
+    yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
 
     # =====================================================
     # ALGORITHM-VARIANT SWITCHES — Defaults reproduzieren exakt das heutige PPO-Verhalten.
@@ -239,9 +239,9 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # 🚫 PENALTIES (negative)
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -5
-    joint_torque_reward_scale = -2e-5
+    joint_torque_reward_scale = -2e-5   
     joint_accel_reward_scale = -2.5e-7
-    action_rate_reward_scale = -0.02
+    action_rate_reward_scale = -0.02    
     flat_orientation_reward_scale = -3.0
 
     movement_penalty_scale = 10.0
@@ -295,7 +295,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
     termination_height = 0.1    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
-    termination_tilt = 0.06     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
+    termination_tilt = 0.04     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
 
 
 @configclass

@@ -232,9 +232,11 @@ class PhantomxThesisEnv(DirectRLEnv):
 
     def _compute_movement_penalty(self, forward_speed: torch.Tensor, command_speed: torch.Tensor) -> torch.Tensor:
         if not self.cfg.continuous_movement_penalty:
-            # Binary: wer nicht schneller als movement_speed_x läuft, bekommt volle Strafe
-            # (unconditional — wie Working-Model 21.04.)
-            is_moving_forward = forward_speed > self.cfg.movement_speed_x
+            # Binary: wer nicht schneller als das aktuell aktive Curriculum-Kommando läuft,
+            # bekommt volle Strafe (vorher fix gegen cfg.movement_speed_x geprüft — das ist
+            # der Max-Wert der letzten Curriculum-Stufe, in früheren Stufen mit kleinerem
+            # Kommando also unerreichbar und damit fast permanent aktiv).
+            is_moving_forward = forward_speed > command_speed
             return (~is_moving_forward).float()
 
         # Continuous: proportionales Defizit zwischen Kommando und Ist-Geschwindigkeit, nur wenn
