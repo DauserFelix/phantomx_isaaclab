@@ -1,0 +1,102 @@
+seed: 42
+
+models:
+  separate: True  # SAC always uses separate models
+  policy:
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -5.0
+    max_log_std: 2.0
+    initial_log_std: -1.9      # Fix 2: log(0.15) — small initial std for safe exploration
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [128, 128]      # war [512,256,128] — für den nächsten Testlauf zurückgesetzt, um mit den
+                                 # bisher analysierten [128,128]-Runs vergleichbar zu bleiben und die teuerste,
+                                 # unbelegte Variable rauszunehmen (siehe Session-Log 2026-07-09, Punkt 10)
+        activations: elu
+    output: ACTIONS
+
+  critic_1:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: concatenate([OBSERVATIONS, ACTIONS])
+        layers: [128, 128]
+        activations: elu
+    output: ONE
+
+  critic_2:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: concatenate([OBSERVATIONS, ACTIONS])
+        layers: [128, 128]
+        activations: elu
+    output: ONE
+
+  target_critic_1:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: concatenate([OBSERVATIONS, ACTIONS])
+        layers: [128, 128]
+        activations: elu
+    output: ONE
+
+  target_critic_2:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: concatenate([OBSERVATIONS, ACTIONS])
+        layers: [128, 128]
+        activations: elu
+    output: ONE
+
+memory:
+  class: NStepMemory          # Fix 3: N-step replay buffer
+  memory_size: 125000         # war 500000 — bei 128 envs gleicher Gesamtbuffer (~16M) wie die 32-env-Runs
+  n_steps: 3                  # Fix 3: 3-step returns (RSL-RL-SAC paper recommendation)
+  replacement: True           # Fix 5: torch.randint statt torch.randperm über den ganzen Buffer — sonst
+                               # kostet jedes sample() O(memory_size*num_envs) statt O(batch_size) (siehe Session-Log 2026-07-09)
+
+agent:
+  class: CustomSAC
+  gradient_steps: 1
+  batch_size: 2048
+  discount_factor: 0.97
+  polyak: 0.005
+  learning_rate: 3.0e-4
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+  observation_preprocessor: RunningStandardScaler
+  observation_preprocessor_kwargs: {}
+  state_preprocessor: null
+  state_preprocessor_kwargs: null
+  random_timesteps: 8000
+  learning_starts: 8000
+  grad_norm_clip: 0.5
+  learn_entropy: True
+  initial_entropy_value: 0.5
+  target_entropy: -9.0         # war -18.0 (=-dim(A)) — weniger negativ, damit Exploration (alpha)
+                                # nicht schon vor Curriculum-Phase 2 (Step ~100k-400k) kollabiert
+  mixed_precision: False
+  # rewards_shaper_scale removed — Fix 1 (physics action bounds) replaces reward scaling
+  experiment:
+    directory: "phantomx_sac"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+trainer:
+  class: SequentialTrainer
+  timesteps: 200000    # war 1000000 — kurzer isolierter Testlauf (siehe Session-Log 2026-07-09,
+                        # Punkt 10). Vor dem naechsten vollen Lauf wieder auf 1000000 zuruecksetzen!
+                        # write_interval/checkpoint_interval sind "auto" -> skalieren automatisch mit
+                        # (write alle 2000, checkpoint alle 20000 Steps statt 10000/100000).
+  environment_info: log

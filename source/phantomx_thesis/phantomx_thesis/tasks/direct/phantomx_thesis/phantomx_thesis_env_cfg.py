@@ -213,9 +213,19 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.20    # MP_BODY at normal standing height (~20cm above ground)
-    movement_speed_x = 0.10      # 10 cm/s — Wert aus funktionierendem Modell (21.04.)
-    yaw_rotation_speed_x = 0.0   # 0 rad/s
+    target_base_height = 0.15    # MP_BODY at normal standing height (~20cm above ground)
+    movement_speed_x = 0.07      # 7 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.07 m/s)
+    yaw_rotation_speed_x = 0.2   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
+
+    # =====================================================
+    # ALGORITHM-VARIANT SWITCHES — Defaults reproduzieren exakt das heutige PPO-Verhalten.
+    # Nur PhantomxThesisSACEnvCfg (siehe unten) überschreibt diese Werte.
+    # =====================================================
+    lin_vel_kernel_width: float = 0.25    # Breite des exp(-error/width) Tracking-Kernels (lin_vel)
+    ang_vel_kernel_width: float = 0.25    # dito für yaw_rate
+    strict_action_pipeline: bool = False  # True: Actions vor Nutzung auf [-1,1] und q_def±joint_pos_limit klemmen
+    continuous_movement_penalty: bool = False  # True: kontinuierlicher velocity-deficit statt binärer Penalty
+    use_sac_curriculum: bool = False      # True: schnellere, kommandorandomisierte Rampe statt 100k/350k-Stufen
 
     # =====================================================
     # REWARD SCALES - TUNED FOR HEXAPOD LOCOMOTION
@@ -224,7 +234,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 10.0
     yaw_rate_reward_scale = 4.0
 
-    height_reward_scale = 0.1    # kein step_dt in env → 0.1/step max (wie 21.04. Working-Model)
+    height_reward_scale = 5.0    # mit step_dt in env: 5.0 × 0.02 = 0.1/step max (wie 21.04. Working-Model)
 
     # 🚫 PENALTIES (negative)
     z_vel_reward_scale = -2.0
@@ -286,3 +296,34 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     termination_height = 0.1    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
     termination_tilt = 0.06     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
+
+
+@configclass
+class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
+    """SAC-Variante: eigene Reward-/Curriculum-Feinabstimmung (Ziel: langsames, sauberes Gehen
+    bis 5 cm/s), ohne die PPO-Cfg oben zu berühren. Physik-/Observation-Code bleibt in
+    PhantomxThesisEnv gemeinsam — nur diese Werte weichen vom PPO-Default ab."""
+
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=128,   # auf skrl_sac_cfg.yaml memory_size=125000 abgestimmt (~16M Transitions gesamt)
+        env_spacing=3.0,
+        replicate_physics=True,
+    )
+
+    target_base_height = 0.15
+    movement_speed_x = 0.05
+    yaw_rotation_speed_x = 0.0
+
+    joint_torque_reward_scale = -5e-6    # 4x abgeschwächt ggü. PPO — bestraft nicht zwischen
+                                          # notwendigem Kraftaufwand und Zittern
+    joint_accel_reward_scale = -2.5e-5   # deutlich hochgesetzt ggü. PPO — schärferer Proxy für
+                                          # Ruckartigkeit, uebernimmt Hauptrolle fuer Smoothness
+
+    termination_height = 0.07
+
+    lin_vel_kernel_width = 0.1   # enger als PPO-Default 0.25 — differenziert Stillstehen klarer
+    ang_vel_kernel_width = 0.1   # von Tracking, auch bei kleinen Curriculum-Kommandos
+
+    strict_action_pipeline = True        # Actions vor Nutzung klemmen (siehe PhantomxThesisEnvCfg)
+    continuous_movement_penalty = True   # kontinuierlicher velocity-deficit statt binaerer Penalty
+    use_sac_curriculum = True            # schnellere, kommandorandomisierte Rampe (fertig ab 100k)

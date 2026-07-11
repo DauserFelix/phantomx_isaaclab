@@ -1,0 +1,274 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-11
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. AUSGANGSLAGE — DETACHED HEAD, ARBEIT AUS BEIDEN VORHERIGEN LOGS FEHLTE IM WORKING TREE
+--------------------------------------------------------------------------------
+
+Tiefe Analyse von logs/2026-07-01_session_history.txt und logs/2026-07-09_session_history.txt
+ergab einen kritischen, nicht in den Logs selbst dokumentierten Befund: der Working Tree
+stand auf Commit be861a3 (18.06., detached HEAD) — VOR der gesamten in beiden Logs
+beschriebenen SKRL-SAC-Arbeit. Diese Arbeit existierte vollständig, aber unbenutzt, auf
+`master` (Commit 7e2036b, bereits auf GitHub gepusht).
+
+Rekonstruierte Timeline (git reflog):
+  2026-07-10 21:13  Commit 7e2036b "sac implementiert, standardabweichung divergiert gegen 7"
+  2026-07-10 22:01  git checkout be861a3 — Working Tree springt 3 Commits zurück, HEAD detached
+  2026-07-10 22:02–01:21  3 PPO-Läufe mit dem ALTEN, ungefixten Code gestartet (auf be861a3)
+
+Nichts war auf Git-Ebene verloren (be861a3 ist Vorfahre von master), aber der Working Tree
+entsprach keinem der beiden Logs mehr — u.a. fehlte das komplette Custom-SAC-Framework
+(skrl_sac_agent.py, skrl_sac_memory.py, skrl_sac_models.py, timeout_wrapper.py existierten
+nicht), play.py hatte nicht die RunningStandardScaler-Fixes aus Log 07-01, ros2_ws/ fehlte
+komplett, movement_speed_x war wieder ein totes Config-Feld (Wert 0.10, Kommentar "10cm/s").
+
+
+--------------------------------------------------------------------------------
+2. REFERENZ-DATEIEN AUS 7e2036b GEZOGEN (logs/merge_files/)
+--------------------------------------------------------------------------------
+
+Auf Anweisung 8 Dateien unverändert aus master (7e2036b) via `git show` extrahiert nach
+logs/merge_files/ (NICHT in die echten Projektpfade, nur als Referenz):
+  skrl_sac_models.py, skrl_sac_memory.py, skrl_sac_agent.py, timeout_wrapper.py,
+  skrl_sac_cfg.yaml, phantomx_thesis_env.py, phantomx_thesis_env_cfg.py, train.py
+
+Zusätzlich später auf Anweisung: kompletter alter PPO-Run "2026-06-19_10-21-03_ppo_torch"
+(Checkpoints bis Step 960k, TensorBoard-Events, params/, sowie zwei vom User selbst
+gesicherte Code-Snapshots "19_06_2026_good_ones" und "21_06_2026") per `git archive` aus
+7e2036b nach logs/merge_files/2026-06-19_10-21-03_ppo_torch/ extrahiert.
+
+
+--------------------------------------------------------------------------------
+3. PLANUNG: PPO-SICHERER MERGE (Plan Mode)
+--------------------------------------------------------------------------------
+
+Auftrag: train.py, phantomx_thesis_env.py, phantomx_thesis_env_cfg.py, skrl_ppo_cfg.yaml
+(aktuell PPO-tauglich) mit den neuen SAC-Dateien zusammenführen, OHNE das laufende gute
+PPO-Training zu gefährden. Alle Unterschiede be861a3 vs. 7e2036b Zeile für Zeile per `diff`
+verifiziert (nicht nur den alten Logs vertraut).
+
+Verifizierte Fakten:
+  - train.py-Diff ist 100% additiv (alter PPO-Pfad 1:1 in else-Zweig verschoben, neuer
+    if algorithm=="sac"-Zweig davor eingefügt).
+  - skrl_ppo_cfg.yaml zwischen be861a3 und 7e2036b identisch (leerer Diff).
+  - IsaacLab (isaaclab_tasks/utils/hydra.py:41) lädt env_cfg fix über "env_cfg_entry_point"
+    pro gym-Task-ID — Env-Cfg kann NICHT pro Algorithmus variieren, wenn beide dieselbe
+    Task-ID nutzen. Zwei gym-IDs nötig (Referenzmuster: isaaclab_tasks/direct/anymal_c,
+    Flat/Rough-Varianten, gleiche Env-Klasse, unterschiedliche Cfg-Klassen).
+  - Terrain ist aktuell terrain_type="plane" → env_origins[:,2]=0.0 (terrain_importer.py:368,
+    verifiziert) — "Höhe relativ zum Terrain" ist unter aktueller Config ein No-op.
+
+Ein Plan-Subagent hatte zwei Behauptungen aufgestellt, die sich bei Gegenprüfung als FALSCH
+herausstellten (wichtig für künftige Sessions — Subagenten-Output nicht ungeprüft übernehmen):
+  - Behauptet: target_base_height sei 0.20→0.17. Tatsächlich (per grep bestätigt): 0.20→0.15.
+  - Behauptet: die verschobene _previous_actions-Berechnung würde einen strukturell toten
+    action_rate_l2-Reward-Term reaktivieren (also NICHT verhaltensneutral). Widerlegt anhand
+    des echten IsaacLab DirectRLEnv.step()-Ablaufs (_pre_physics_step → Physik → _get_dones →
+    _get_rewards → _reset_idx → _get_observations, direct_rl_env.py:363-410): beide Varianten
+    erzeugen exakt denselben Cross-Step-Lag. Empirisch nochmal in Verifikation B bestätigt.
+
+
+--------------------------------------------------------------------------------
+4. UNERWARTETER ZUSTAND WÄHREND DER UMSETZUNG — LIVE-TRAINING + MANUELLE USER-ÄNDERUNG
+--------------------------------------------------------------------------------
+
+Beim Start der Implementierung (nach train.py-Ersetzung) festgestellt: phantomx_thesis_env.py
+und phantomx_thesis_env_cfg.py waren gegenüber be861a3 bereits verändert — NICHT durch diese
+Session, sondern durch den User selbst (parallel, vermutlich in einem separaten Terminal):
+  env_cfg.py: movement_speed_x 0.10→0.07, yaw_rotation_speed_x 0.0→0.2
+  env.py: Curriculum in _reset_idx() umgebaut, nutzt jetzt self.cfg.movement_speed_x/
+          yaw_rotation_speed_x als Quelle der Wahrheit (100k/350k-Schwellen beibehalten)
+
+Gleichzeitig lief bereits ein aktives PPO-Training (PID 92511, gestartet 13:26 Uhr,
+--task Template-Phantomx-Thesis-Direct-v0 --num_envs 512 --algorithm PPO --headless) mit
+GENAU diesem neuen Stand (verifiziert über params/env.yaml des laufenden Runs:
+movement_speed_x=0.07, yaw_rotation_speed_x=0.2).
+
+Arbeit pausiert, User gefragt: gilt diese manuelle Änderung als neue PPO-Baseline? User
+bestätigte: JA. Der gesamte weitere Merge-Plan wurde auf diesem NEUEN Stand aufgebaut,
+nicht mehr auf be861a3. (Nachträgliche Nutzerfrage beantwortet: keine der Datei-Änderungen
+NACH dieser Bestätigung betrifft den laufenden Trainingsprozess — Python liest .py-Dateien
+nur beim Start ein, der Prozess läuft seit 13:26 mit dem damaligen Code-Stand im Speicher,
+unabhängig von späteren Aenderungen auf der Platte.)
+
+
+--------------------------------------------------------------------------------
+5. UMGESETZTE ÄNDERUNGEN (auf dem neuen, bestätigten PPO-Stand aufgebaut)
+--------------------------------------------------------------------------------
+
+Architektur: EINE gemeinsame phantomx_thesis_env.py (Physik/Reward/Observation-Code bleibt
+geteilt), ZWEI Env-Cfg-Klassen, ZWEI gym-Task-IDs — PPO unverändert per Default, SAC über
+eine neue Subklasse mit eigenen Werten.
+
+a) 4 self-contained SAC-Module 1:1 aus logs/merge_files/ in die echten Pfade kopiert
+   (agents/skrl_sac_models.py, skrl_sac_memory.py, skrl_sac_agent.py, timeout_wrapper.py).
+   Keine Anpassung nötig — nur skrl/torch/gymnasium-Abhängigkeiten, keine Projekt-internen
+   Querimporte.
+
+b) scripts/skrl/train.py: aus merge_files übernommen (additive SAC-Branch), PLUS neue
+   Assertion direkt vor gym.make(): bricht mit klarer Fehlermeldung ab, wenn
+   --algorithm sac auf einer Nicht-SAC-Env-Cfg läuft (oder umgekehrt) — verhindert
+   versehentliches Vermischen von Task-ID und Algorithmus.
+
+c) phantomx_thesis_env_cfg.py — PhantomxThesisEnvCfg (PPO-Basisklasse):
+   - height_reward_scale: 0.1 → 5.0 (gekoppelt mit env.py step_dt-Multiplikation,
+     algebraisch neutral: 5.0 × 0.02 = 0.1, alter Wert)
+   - Neue Felder mit PPO-kompatiblen Defaults (ändern nichts am bisherigen Verhalten):
+     lin_vel_kernel_width=0.25, ang_vel_kernel_width=0.25, strict_action_pipeline=False,
+     continuous_movement_penalty=False, use_sac_curriculum=False
+
+d) phantomx_thesis_env.py — unbedingte Fixes (kein Risiko, verifiziert):
+   - filter_collisions() jetzt immer aufgerufen (vorher nur bei device=="cpu" — im GPU-
+     Trainingsfall, dem Normalfall, lief das bisher nie)
+   - Höhenmessung (Reward UND Termination) jetzt relativ zu self._terrain.env_origins[:,2]
+     (aktuell No-op, siehe Punkt 3)
+   - reward = torch.nan_to_num(reward, ...) als Sicherheitsnetz ergänzt
+   - _previous_actions-Zuweisung von _get_observations() nach _pre_physics_step() verschoben
+     (verifiziert verhaltensneutraler Refactor, siehe Punkt 3 + Verifikation B)
+
+   Hinter self.cfg.strict_action_pipeline (Default False, PPO unverändert):
+   - actions vor Nutzung auf [-1,1] geklemmt + processed_actions zusätzlich auf
+     q_def±joint_pos_limit geklemmt (bei action_scale=0.5 < joint_pos_limit=0.5235 ist der
+     zweite Clamp mathematisch redundant, kostet aber nichts)
+
+   Extrahiert in überschreibbare/parametrisierte Stellen (PPO-Pfad = alter Code, unverändert):
+   - Tracking-Kernel-Breite: exp(-error/0.25) → exp(-error/self.cfg.lin_vel_kernel_width)
+     (analog yaw_rate)
+   - movement_penalty in neue Methode _compute_movement_penalty() ausgelagert: binäre Formel
+     bleibt Default, kontinuierliche velocity-deficit-Formel nur bei
+     continuous_movement_penalty=True
+   - Curriculum in _reset_idx() in neue Methode _apply_velocity_curriculum() ausgelagert:
+     die aktuelle 100k/350k-Stufen-Logik (Punkt 4) bleibt exakt als Default-Codepfad
+     erhalten; bei use_sac_curriculum=True läuft stattdessen eine schnellere,
+     kommandorandomisierte Rampe (fertig ab Step 100k statt in 350k/1.05M-Stufen)
+
+e) phantomx_thesis_env_cfg.py — NEU: PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
+   scene.num_envs=128, target_base_height=0.15, movement_speed_x=0.05,
+   yaw_rotation_speed_x=0.0, joint_torque_reward_scale=-5e-6,
+   joint_accel_reward_scale=-2.5e-5, termination_height=0.07,
+   lin_vel_kernel_width=ang_vel_kernel_width=0.1, strict_action_pipeline=True,
+   continuous_movement_penalty=True, use_sac_curriculum=True
+
+f) source/.../phantomx_thesis/__init__.py: zweite gym.register("Template-Phantomx-Thesis-
+   SAC-Direct-v0") ergänzt (gleicher entry_point/Env-Klasse, env_cfg_entry_point zeigt auf
+   PhantomxThesisSACEnvCfg, skrl_sac_cfg_entry_point von der PPO- zur SAC-Registrierung
+   verschoben).
+
+g) agents/skrl_sac_cfg.yaml: aus merge_files kopiert, 2 bekannte Fallen korrigiert:
+   - trainer.timesteps: 200000 → 1000000 (war ein nie zurückgesetzter Diagnose-Testlauf
+     aus der Session vom 07-09)
+   - memory_size=125000-Kommentar präzisiert: abgestimmt auf
+     PhantomxThesisSACEnvCfg.scene.num_envs=128
+
+
+--------------------------------------------------------------------------------
+6. VERIFIKATION
+--------------------------------------------------------------------------------
+
+- py_compile auf alle 5 geänderten/neuen .py-Dateien → fehlerfrei.
+- skrl_sac_cfg.yaml per PyYAML geparst → gültig, alle korrigierten Werte bestätigt
+  (timesteps=1000000, memory_size=125000, replacement=True, target_entropy=-9.0).
+- VERIFIKATION B (Reward-Regressionsscript, reines Python/torch, KEIN Isaac Sim):
+  Reward-relevante Formeln aus phantomx_thesis_env.py (ALT vor heutigen Edits vs. NEU)
+  mit synthetischen Tensoren nachgebaut, Term für Term auf exakte Gleichheit geprüft unter
+  PPO-Default-Flags (alle neuen Cfg-Felder aus). ALLE CHECKS BESTANDEN — insbesondere die
+  _previous_actions-Cross-Step-Semantik über 3 aufeinanderfolgende Steps empirisch bestätigt,
+  nicht nur analytisch hergeleitet. Script lag im Scratchpad, nicht Teil des Repos.
+- VERIFIKATION A/C/D (echte Isaac-Sim-Kurzläufe für PPO- und SAC-Task) — NICHT durchgeführt.
+  User wollte den parallel laufenden PPO-Trainingsjob (PID 92511, seit 13:26 Uhr) nicht durch
+  einen zweiten Isaac-Sim-Prozess gefährden. Verschoben auf nach Abschluss dieses Laufs.
+
+
+--------------------------------------------------------------------------------
+7. GEÄNDERTE/NEUE DATEIEN DIESER SESSION (nichts committed, alles im Working Tree)
+--------------------------------------------------------------------------------
+
+Geändert (vorher getrackt, be861a3 + User-Curriculum-Edit als Ausgangspunkt):
+  scripts/skrl/train.py
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/__init__.py
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_cfg.yaml
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/phantomx_thesis_env.py
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/phantomx_thesis_env_cfg.py
+
+Neu (vorher nicht im Working Tree vorhanden):
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_agent.py
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_memory.py
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_models.py
+  source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/timeout_wrapper.py
+
+Referenzmaterial (nicht Teil des Merges, nur Staging/Nachschlagen):
+  logs/merge_files/  (die 8 Originaldateien aus 7e2036b + kompletter Run
+                       2026-06-19_10-21-03_ppo_torch inkl. Checkpoints)
+
+
+--------------------------------------------------------------------------------
+8. ROLLBACK — FALLS DIE HEUTIGEN ÄNDERUNGEN RÜCKGÄNGIG GEMACHT WERDEN MÜSSEN
+--------------------------------------------------------------------------------
+
+WICHTIG: Nichts von heute ist committed. Ein `git checkout -- <datei>` stellt den Stand von
+be861a3 wieder her — das ist NICHT dasselbe wie "nur die heutigen Änderungen entfernen",
+weil be861a3 auch die manuelle User-Änderung von movement_speed_x/yaw_rotation_speed_x/
+Curriculum (Punkt 4, ebenfalls nicht committed) NICHT enthält. `git checkout --` würde also
+sowohl den heutigen Merge ALS AUCH die eigene manuelle Vorarbeit von heute Nachmittag
+verwerfen.
+
+Empfehlung, um dieses Risiko zu vermeiden: JETZT einen Git-Commit des aktuellen Standes
+anlegen (auf Wunsch, nicht automatisch ausgeführt), dann ist Rollback ein einfaches
+`git revert`/`git reset` auf einen benannten Punkt statt manueller Datei-Rekonstruktion.
+
+Ohne Commit, nur die heutigen Merge-Änderungen zurücksetzen (User-Curriculum-Edit bleibt
+NICHT automatisch erhalten, da beide Stände nur als Dateiinhalt existieren — vor dem Rollback
+ggf. Punkt 4 dieses Logs als Referenz nutzen, um movement_speed_x=0.07/yaw=0.2 und die
+100k/350k-Curriculum-Werte danach von Hand wiederherzustellen):
+
+  cd /workspace/projects/phantomx_thesis
+
+  # Modifizierte, getrackte Dateien auf be861a3-Stand zurücksetzen:
+  git checkout -- \
+    scripts/skrl/train.py \
+    source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/__init__.py \
+    source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_cfg.yaml \
+    source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/phantomx_thesis_env.py \
+    source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/phantomx_thesis_env_cfg.py
+
+  # Neue, bisher ungetrackte Dateien entfernen:
+  rm source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_agent.py \
+     source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_memory.py \
+     source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/skrl_sac_models.py \
+     source/phantomx_thesis/phantomx_thesis/tasks/direct/phantomx_thesis/agents/timeout_wrapper.py
+
+  # Optional: Referenzmaterial aus logs/merge_files/ entfernen (unschädlich, nirgends importiert):
+  rm -rf logs/merge_files/
+
+Selektiver Rollback (nur SAC-Teile raus, PPO-Fixes von heute behalten): die neuen Cfg-Felder
+(strict_action_pipeline, continuous_movement_penalty, use_sac_curriculum, lin_vel/
+ang_vel_kernel_width) stehen für PPO bereits auf den alten Defaults — es reicht, NUR
+PhantomxThesisSACEnvCfg (env_cfg.py), die zweite gym.register (__init__.py) und die 4 neuen
+agents/-Dateien zu entfernen; phantomx_thesis_env.py kann unverändert bleiben, da sein
+PPO-Pfad ohnehin identisch zum Vorher-Stand ist (siehe Verifikation B).
+
+
+--------------------------------------------------------------------------------
+9. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. Verifikation A/C/D (echte Isaac-Sim-Läufe) nachholen, sobald der aktuelle PPO-Job
+   (gestartet 2026-07-11 13:26) fertig ist:
+   A) Kurzer PPO-Lauf (--max_iterations 1) vor/nach-Vergleich der geloggten params/env.yaml
+   C) PPO-Kurzlauf 50k-100k Steps, Episode_Reward/* pro Term gegen Referenz vergleichen
+   D) SAC-Smoke-Test über die neue Task-ID (--task Template-Phantomx-Thesis-SAC-Direct-v0
+      --algorithm SAC --num_envs 128), nur Startfähigkeit prüfen, kein voller Lauf
+2. Git-Commit des heutigen Standes anlegen (auf Wunsch) — siehe Punkt 8, macht künftige
+   Rollbacks deutlich robuster.
+3. play.py hat weiterhin keinen CustomSAC-Ladepfad (war schon in Log 07-09 offen) — für
+   das spätere Abspielen/Evaluieren trainierter SAC-Checkpoints nötig, nicht Teil dieser
+   Session.
+4. GRAVEL_TERRAIN_CFG (in merge_files/phantomx_thesis_env_cfg.py vorhanden) bewusst NICHT
+   übernommen — separates Vorhaben laut be861a3-Commit-Message ("Jetzt hinzufügen: Gehen
+   auf Unebenem Terrain"), nicht in diesem Merge.
+
+================================================================================

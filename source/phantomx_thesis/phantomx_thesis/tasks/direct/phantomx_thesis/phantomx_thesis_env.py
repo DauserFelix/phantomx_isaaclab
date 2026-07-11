@@ -81,27 +81,38 @@ class PhantomxThesisEnv(DirectRLEnv):
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
         self.scene.clone_environments(copy_from_source=False)
-
-        if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
     # --------------------- ACTION ---------------------
     def _pre_physics_step(self, actions: torch.Tensor):
-        self._actions = actions.clone()
+        # previous_actions vor dem Ueberschreiben von self._actions einfangen — Cross-Step-Lag
+        # bleibt identisch zur alten Zuweisung in _get_observations() (siehe Verifikations-Script),
+        # aber die Zuweisung sitzt jetzt direkt neben der Stelle, die sie betrifft.
+        self._previous_actions = self._actions.clone()
+
+        if self.cfg.strict_action_pipeline:
+            self._actions = torch.clamp(actions, -1.0, 1.0)
+        else:
+            self._actions = actions.clone()
 
         q_def = self._robot.data.default_joint_pos
-        self._processed_actions = q_def + self.cfg.action_scale * self._actions
+        processed_actions = q_def + self.cfg.action_scale * self._actions
+        if self.cfg.strict_action_pipeline:
+            processed_actions = torch.clamp(
+                processed_actions,
+                q_def - self.cfg.joint_pos_limit,
+                q_def + self.cfg.joint_pos_limit,
+            )
+        self._processed_actions = processed_actions
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     # --------------------- OBSERVATIONS ---------------------
     def _get_observations(self) -> dict:
-        self._previous_actions = self._actions.clone()
-
         # Sensor-Messungen mit Rauschen (Sim-to-Real: modelliert Encoder/IMU-Noise)
         lin_vel  = self._robot.data.root_lin_vel_b  + torch.randn_like(self._robot.data.root_lin_vel_b)  * 0.01
         ang_vel  = self._robot.data.root_ang_vel_b  + torch.randn_like(self._robot.data.root_ang_vel_b)  * 0.01
@@ -132,13 +143,13 @@ class PhantomxThesisEnv(DirectRLEnv):
             torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]),
             dim=1
         )
-        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
+        lin_vel_error_mapped = torch.exp(-lin_vel_error / self.cfg.lin_vel_kernel_width)
 
         # yaw rate tracking
         yaw_rate_error = torch.square(
             self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2]
         )
-        yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
+        yaw_rate_error_mapped = torch.exp(-yaw_rate_error / self.cfg.ang_vel_kernel_width)
 
         # z velocity penalty (body should not bounce)
         z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
@@ -164,8 +175,11 @@ class PhantomxThesisEnv(DirectRLEnv):
             dim=1
         )
 
-        # MP_BODY height tracking (no step_dt — dominant reward, matches old working config)
-        base_height = self._robot.data.body_pos_w[:, self._mp_body_idx[0], 2]
+        # MP_BODY height tracking — relativ zum lokalen Terrain-Ursprung (No-op solange
+        # terrain_type="plane", relevant sobald generiertes Terrain mit env-abhängigem
+        # Z-Offset genutzt wird)
+        terrain_z = self._terrain.env_origins[:, 2]
+        base_height = self._robot.data.body_pos_w[:, self._mp_body_idx[0], 2] - terrain_z
         height_error = torch.square(base_height - self.cfg.target_base_height)
         height_reward = torch.exp(-height_error / 0.02)
 
@@ -174,8 +188,7 @@ class PhantomxThesisEnv(DirectRLEnv):
 
         # Movement penalty: penalizes not moving forward (unconditional — wie Working-Model 21.04.)
         forward_speed = self._robot.data.root_lin_vel_b[:, 0]
-        is_moving_forward = forward_speed > self.cfg.movement_speed_x
-        movement_penalty = (~is_moving_forward).float()
+        movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
 
         # Foot contact reward — bonus for stable tripod support base (≥3 feet on ground)
         foot_forces = self._contact_sensor.data.net_forces_w[:, self._die_body_ids, :]
@@ -202,7 +215,7 @@ class PhantomxThesisEnv(DirectRLEnv):
             "action_rate_l2":       action_rate            * self.cfg.action_rate_reward_scale    * self.step_dt,
             "flat_orientation_l2":  flat_orientation       * self.cfg.flat_orientation_reward_scale * self.step_dt,
             "alive":                alive_reward           * self.cfg.alive_reward_scale          * self.step_dt,
-            "height_tracking":      height_reward          * self.cfg.height_reward_scale,
+            "height_tracking":      height_reward          * self.cfg.height_reward_scale         * self.step_dt,
             "movement_penalty":     -movement_penalty      * self.cfg.movement_penalty_scale      * self.step_dt,
             "foot_contact":         foot_contact_reward    * self.cfg.foot_contact_reward_scale   * self.step_dt,
             "tripod_gait":          tripod_score           * self.cfg.tripod_gait_reward_scale    * self.step_dt,
@@ -210,18 +223,33 @@ class PhantomxThesisEnv(DirectRLEnv):
         }
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+        reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
         for key, value in rewards.items():
             self._episode_sums[key] += value
 
         return reward
 
+    def _compute_movement_penalty(self, forward_speed: torch.Tensor, command_speed: torch.Tensor) -> torch.Tensor:
+        if not self.cfg.continuous_movement_penalty:
+            # Binary: wer nicht schneller als movement_speed_x läuft, bekommt volle Strafe
+            # (unconditional — wie Working-Model 21.04.)
+            is_moving_forward = forward_speed > self.cfg.movement_speed_x
+            return (~is_moving_forward).float()
+
+        # Continuous: proportionales Defizit zwischen Kommando und Ist-Geschwindigkeit, nur wenn
+        # überhaupt ein nennenswertes Vorwärtskommando anliegt (Schwelle relativ zu movement_speed_x,
+        # sonst wäre der Gate bei kleinem movement_speed_x tot).
+        has_forward_command = command_speed.abs() > 0.1 * self.cfg.movement_speed_x
+        velocity_deficit = torch.clamp(command_speed - forward_speed, min=0.0)
+        return velocity_deficit * has_forward_command.float()
+
     # --------------------- TERMINATION ---------------------
     def _get_dones(self):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        # MP_BODY world height (physical body, not virtual base_link)
-        mp_body_height = self._robot.data.body_pos_w[:, self._mp_body_idx[0], 2]
+        # MP_BODY height relative zum lokalen Terrain-Ursprung (No-op solange terrain_type="plane")
+        mp_body_height = self._robot.data.body_pos_w[:, self._mp_body_idx[0], 2] - self._terrain.env_origins[:, 2]
         gravity = self._robot.data.projected_gravity_b
         tilt = torch.sum(torch.square(gravity[:, :2]), dim=1)
 
@@ -255,19 +283,7 @@ class PhantomxThesisEnv(DirectRLEnv):
         self._previous_actions[env_ids] = 0.0
         self._has_stood_up[env_ids] = False
 
-        # Velocity curriculum
-        steps = self.common_step_counter
-        if steps < 100_000:
-            self._commands[env_ids] = 0.0
-        elif steps < 350_000:
-            self._commands[env_ids] = 0.0
-            self._commands[env_ids, 0] = torch.rand(len(env_ids), device=self.device) * 0.5
-        else:
-            curriculum_factor = min(1.0, (steps - 350_000) / 700_000)
-            max_vel = 0.3 + curriculum_factor * 0.7   # 0.3 → 1.0 m/s
-            self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(
-                -max_vel, max_vel
-            )
+        self._apply_velocity_curriculum(env_ids)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -295,6 +311,49 @@ class PhantomxThesisEnv(DirectRLEnv):
         extras = dict()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
+
+    def _apply_velocity_curriculum(self, env_ids: torch.Tensor):
+        """Setzt self._commands[env_ids] gemäß Trainings-Curriculum.
+
+        movement_speed_x/yaw_rotation_speed_x aus der Cfg sind die einzige Quelle der
+        Wahrheit für die Ziel-Geschwindigkeiten. Zwei Rampenformen je nach
+        cfg.use_sac_curriculum — Default (False) reproduziert exakt das aktuelle
+        PPO-Verhalten (100k/350k-Stufen).
+        """
+        steps = self.common_step_counter
+        max_speed = self.cfg.movement_speed_x
+        max_yaw = self.cfg.yaw_rotation_speed_x
+
+        if not self.cfg.use_sac_curriculum:
+            if steps < 100_000:
+                self._commands[env_ids] = 0.0
+            elif steps < 350_000:
+                self._commands[env_ids] = 0.0
+                self._commands[env_ids, 0] = max_speed / 2
+            else:
+                self._commands[env_ids] = 0.0
+                self._commands[env_ids, 0] = max_speed
+                self._commands[env_ids, 2] = torch.zeros_like(
+                    self._commands[env_ids, 2]
+                ).uniform_(-max_yaw, max_yaw)
+            return
+
+        # SAC-Variante: sehr frühe fixe Phase, danach ein sich weitendes Zufallsfenster
+        # (fertig ab Step 100k statt Step 1.05M — bewusst andere, schnellere Zeitform).
+        if steps < 10_000:
+            self._commands[env_ids] = 0.0
+            self._commands[env_ids, 0] = max_speed
+        else:
+            progress = min(1.0, (steps - 10_000) / 90_000)
+            min_vel = max_speed * (1.0 - 0.8 * progress)
+            self._commands[env_ids] = 0.0
+            self._commands[env_ids, 0] = (
+                min_vel + torch.rand(len(env_ids), device=self.device) * (max_speed - min_vel)
+            )
+            if max_yaw > 0:
+                self._commands[env_ids, 2] = torch.zeros_like(
+                    self._commands[env_ids, 2]
+                ).uniform_(-max_yaw, max_yaw)
 
     def get_IO_descriptors(self) -> dict:
         return {

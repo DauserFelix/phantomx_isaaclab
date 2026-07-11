@@ -1,0 +1,239 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL / ROS2
+Datum: 2026-07-01
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. PLAY.PY FIXES — 3 kaskadierte TypeErrors beim SAC-Checkpoint-Laden
+--------------------------------------------------------------------------------
+
+Problem: play.py umgeht den SKRL-Runner (wegen Custom-Modellen), der Runner
+macht aber 3 Dinge automatisch die play.py manuell replizieren muss.
+
+Fix A — YAML (skrl_sac_cfg.yaml, Zeile 74):
+  observation_preprocessor_kwargs: null  →  {}
+
+Fix B — play.py: String zu Python-Klasse auflösen:
+  from skrl.resources.preprocessors.torch import RunningStandardScaler
+  _SKRL_PREPROCESSORS = {"RunningStandardScaler": RunningStandardScaler}
+
+Fix C — play.py: size + device in kwargs injizieren:
+  "observation_preprocessor_kwargs" → {"size": obs_space, "device": device}
+  (repliziert runner.py:469-471)
+
+Ergebnis: alle 3 Fehler behoben, kein Neutraining nötig.
+
+
+--------------------------------------------------------------------------------
+2. CURRICULUM-FIX (SAC Run 8 — Roboter steht perfekt, läuft nicht)
+--------------------------------------------------------------------------------
+
+Ursache 1: Curriculum-Counter war self.common_step_counter * self.num_envs
+  → Threshold wurde nie erreicht (zu hoch gezählt)
+  Fix: steps = self.common_step_counter  (ohne * num_envs)
+
+Ursache 2: Binäre Movement-Penalty gab keine Gradienten
+  Fix: Kontinuierlicher velocity_deficit = clamp(cmd - actual, 0, ∞)
+  movement_penalty = velocity_deficit * has_forward_command
+
+Curriculum-Phasen (policy steps):
+  <  10.000: cmd_vx = 0.05 fix (kein Stehenlassen optimal)
+  < 100.000: vx ramp 0.05→0.30, forward-only
+  < 400.000: vx ramp 0.30→0.60, 0.1 floor
+  ≥ 400.000: full ±vx, vy, yaw bis 1.0 m/s
+
+
+--------------------------------------------------------------------------------
+3. EXPORT-PIPELINE FÜR ROS2
+--------------------------------------------------------------------------------
+
+Datei: scripts/skrl/export_policy_ros2.py
+       ros2_ws/src/phantomx_package/src/export_policy.py
+
+Warum Export nötig:
+  - best_agent.pt enthält Critic, Optimizer, SKRL-Objekte → nicht standalone
+  - Export: nur Policy + RunningStandardScaler → reines torch.jit TorchScript
+  - ROS2-Node braucht nur: bundle = torch.jit.load("policy_ros2_ppo.pt")
+
+PPO-Checkpoint-Keys:  net_container.0/2, policy_layer
+SAC-Checkpoint-Keys:  net.0/2, mean_head
+
+Export-Befehl:
+  python3 export_policy.py --checkpoint best_agent.pt --algorithm ppo|sac
+
+Beachte: export_policy.py in ros2_ws ist für SKRL angepasst (war RSL-RL).
+
+
+--------------------------------------------------------------------------------
+4. LOG_STD = 2.0 — KEIN ZEICHEN FÜR NICHT-KONVERGENZ
+--------------------------------------------------------------------------------
+
+Erklärung: log_std_parameter ist ein separater gelernter Parameter, unabhängig
+vom Netzwerk-Output (mean_actions). Entropy-Koeffizient (0.005) verhindert,
+dass log_std kollabiert solange mean_actions gute Rewards liefern.
+
+Während Inferenz: nur mean_actions wird genutzt (deterministisch).
+Policy kann exzellent sein trotz log_std = 2.0.
+
+Output-Range [-40, +58] für Zero-Observations war irreführender Test —
+Zero-Obs liegt weit außerhalb der Trainingsverteilung. Mit echten normierten
+Obs gibt die Policy sinnvolle Werte.
+
+
+--------------------------------------------------------------------------------
+5. ROS2 NODE ANALYSE (phantomx_apply_policy.py)
+--------------------------------------------------------------------------------
+
+Observation-Vektor (66 Dim) — Reihenfolge exakt wie Isaac Lab:
+  [0:3]   lin_vel_b       m/s      Body-Frame linear velocity
+  [3:6]   ang_vel_b       rad/s    Body-Frame angular velocity
+  [6:9]   gravity_b       -        Einheitsvektor, Roboter gerade: [0,0,-1]
+  [9:12]  commands        m/s,r/s  [vx, vy, yaw_rate]
+  [12:30] joint_pos_rel   rad      pos - default, POLICY-REIHENFOLGE
+  [30:48] joint_vel       rad/s    POLICY-REIHENFOLGE
+  [48:66] last_actions    -        geclippter Output [-1,1], POLICY-REIHENFOLGE
+
+Joint-Reihenfolge (Isaac Lab alphabetisch):
+  [0-5]   j_c1_lf/lm/lr/rf/rm/rr     coxa,  default=0.0 rad
+  [6-11]  j_thigh_lf/lm/lr/rf/rm/rr  femur, default=0.5 rad
+  [12-17] j_tibia_lf/lm/lr/rf/rm/rr  tibia, default=0.5 rad
+
+Action-Pipeline (exakt wie Isaac Lab _pre_physics_step):
+  1. clip(policy_output, -1.0, +1.0)
+  2. q_target = default_joint_pos + 0.5 * clipped
+  3. clamp(q_target, default ± 0.5235 rad)
+  4. → PD-Regler sendet Drehmoment
+
+last_actions: nach Publishen setzen (= clipped actions des aktuellen Steps).
+  POLICY_TO_MOTOR / MOTOR_TO_POLICY Maps korrekt implementiert.
+
+
+--------------------------------------------------------------------------------
+6. IMU GRAVITY-FIX — QUATERNION STATT BESCHLEUNIGUNG
+--------------------------------------------------------------------------------
+
+Problem vorher: gravity_b = a_imu / |a_imu| → falsch bei Bewegung + falsches Vorzeichen
+
+Fix (korrekte Quaternion-Rotation R^T @ [0,0,-1]):
+  qx,qy,qz,qw = msg.orientation.x/y/z/w (normiert)
+  gravity_b[0] = -(2*(qx*qz - qy*qw))
+  gravity_b[1] = -(2*(qy*qz + qx*qw))
+  gravity_b[2] = -(1 - 2*(qx² + qy²))
+
+Testfälle verifiziert:
+  identity quat:    [0, 0, -1]  ✓
+  +45° pitch fwd:   [+0.707, 0, -0.707]  ✓
+  -45° pitch back:  [-0.707, 0, -0.707]  ✓
+  +90° roll rechts: [0, -1, 0]  ✓
+  180° pitch:       [0, 0, +1]  ✓
+
+Voraussetzung: Gazebo IMU muss msg.orientation publishen.
+
+
+--------------------------------------------------------------------------------
+7. SMOOTH POLICY RUNNER — RUCKELIGKEIT IN ROS2
+--------------------------------------------------------------------------------
+
+Ursache der Ruckeligkeit: Policy-Output bis ±40 wird auf ±1 geclippt
+→ Gelenkziele springen ±0.5 rad / 0.02s = 25 rad/s (Limit: 0.8 rad/s)
+
+Lösung: SmoothPolicyRunner in export_policy_ros2.py
+  EMA-Smoothing:    smooth = α*raw + (1-α)*smooth_prev  (α=0.20)
+  Rate-Limiting:    delta = clamp(smooth - prev_sent, ±max_delta)
+  max_action_delta = 0.032 → max 0.8 rad/s Gelenkgeschwindigkeit (= HW-Limit)
+
+Ergebnis: Worst-case 25 rad/s → max 0.8 rad/s, kein Ruckeln mehr.
+
+
+--------------------------------------------------------------------------------
+8. CONTROLLER & AKTUATOR-PARAMETER
+--------------------------------------------------------------------------------
+
+Typ: Implicit Position-PD (PhysX-intern, kein Drehmoment im Action-Space)
+
+Parameter (alle 18 Gelenke identisch):
+  Kp (stiffness)  = 10.0 Nm/rad
+  Kd (damping)    = 2.0  Nm·s/rad
+  effort_limit    = 1.5  Nm
+  velocity_limit  = 0.8  rad/s   (nur 14% des URDF-Limits!)
+  action_scale    = 0.5           (policy ±1 → ±0.5 rad Offset)
+  joint_pos_limit = 0.5235 rad    (±30° vom Default)
+
+URDF Hardware-Limits (nicht aktiv während Training):
+  effort   = 2.8 Nm
+  velocity = 5.655 rad/s  (54 RPM → vermutlich Dynamixel AX-12A)
+  range    = ±2.618 rad (±150°)
+
+Timing:
+  sim.dt      = 0.005 s (200 Hz Physik)
+  decimation  = 4
+  policy_dt   = 0.020 s (50 Hz Policy)
+
+
+--------------------------------------------------------------------------------
+9. REIBUNG TIBIA/BODEN
+--------------------------------------------------------------------------------
+
+Isaac Lab (PhysX, combine_mode=multiply):
+  Boden:         static=1.0, dynamic=1.0
+  Roboter (rand): static=0.7-1.0, dynamic=0.5-0.8
+  Effektiv:       static=0.7-1.0, dynamic=0.5-0.8
+
+Gazebo Äquivalent (ODE, combine_mode=minimum → Boden auf 1.0 setzen):
+  Boden:         mu=1.0, mu2=1.0
+  Roboter-Links: mu=0.85 (Mitte 0.7-1.0), mu2=0.65 (Mitte 0.5-0.8)
+  Effektiv:      min(0.85, 1.0)=0.85 static, min(0.65, 1.0)=0.65 dynamic
+
+
+--------------------------------------------------------------------------------
+10. WICHTIGSTE SIM-TO-SIM STOLPERSTEINE (Priorität)
+--------------------------------------------------------------------------------
+
+1. [HOCH]   lin_vel_b: IMU-Integration driftet → /odom verwenden falls vorhanden
+2. [HOCH]   gravity_b: Quaternion verwenden (Fix implementiert)
+3. [MITTEL] PD-Gains: Kp=10, Kd=2 in Gazebo exakt replizieren
+4. [MITTEL] Velocity-Limit: 0.8 rad/s in Gazebo setzen (nicht 5.65 rad/s!)
+5. [NIEDRIG] Reibung: mu=0.85, mu2=0.65 für Roboter-Bodies
+6. [NIEDRIG] Settle-Phase: 5 Policy-Steps ohne Aktionen nach Reset (noch nicht impl.)
+
+Joint-Reihenfolge in ROS2: Isaac Lab alphabetisch ≠ URDF ≠ Gazebo /joint_states
+→ POLICY_TO_MOTOR / MOTOR_TO_POLICY Mapping im Node verwenden.
+
+
+--------------------------------------------------------------------------------
+11. GEÄNDERTE DATEIEN DIESER SESSION
+--------------------------------------------------------------------------------
+
+scripts/skrl/play.py
+  → Fix A/B/C für RunningStandardScaler
+
+scripts/skrl/export_policy_ros2.py
+  → SmoothPolicyRunner, --ema_alpha, --max_action_delta, --demo
+
+source/phantomx_thesis/.../phantomx_thesis_env.py
+  → Curriculum-Fix (step counter), kontinuierliche Movement-Penalty
+
+source/phantomx_thesis/.../agents/skrl_sac_cfg.yaml
+  → observation_preprocessor_kwargs: null → {}
+
+ros2_ws/src/phantomx_package/src/export_policy.py
+  → Für SKRL PPO + SAC umgeschrieben (war RSL-RL)
+
+ros2_ws/src/phantomx_package/scripts/policy/phantomx_apply_policy.py
+  → IMU Gravity: Quaternion statt Beschleunigung (korrekte Formel)
+  → Action-Pipeline: clip vor Skalierung, last_actions korrekt gesetzt
+
+docs/observation_action_space.txt
+  → Vollständige Obs/Action Space Dokumentation (66 Dim, alle Details)
+
+
+--------------------------------------------------------------------------------
+12. LAUFENDE TRAININGS
+--------------------------------------------------------------------------------
+
+SAC Run 9: Resume von Run 8 mit Curriculum-Fix + Movement-Penalty-Fix
+PPO Run:   2026-06-28_22-47-57_ppo_torch — Exportiert als policy_ros2_ppo.pt
+
+================================================================================
