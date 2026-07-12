@@ -38,6 +38,18 @@ parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
+parser.add_argument(
+    "--resume_step",
+    type=int,
+    default=None,
+    help=(
+        "Env step to resume the velocity curriculum at (see PhantomxThesisEnv._apply_velocity_curriculum). "
+        "agent.load() only restores network/optimizer weights, not env.common_step_counter, so without this "
+        "a resumed run's curriculum silently restarts at step 0. If omitted and --checkpoint matches the "
+        "'agent_<N>.pt' periodic-checkpoint naming pattern, N is used as a best-effort default (this does not "
+        "apply to 'best_agent.pt', which has no step number in its name)."
+    ),
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -77,6 +89,7 @@ simulation_app = app_launcher.app
 import logging
 import os
 import random
+import re
 import time
 from datetime import datetime
 
@@ -198,6 +211,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # get checkpoint path (to resume training)
     resume_path = retrieve_file_path(args_cli.checkpoint) if args_cli.checkpoint else None
 
+    # resolve the velocity-curriculum resume step (Problem 2 fix): agent.load() below only
+    # restores network/optimizer weights, never env.common_step_counter, so without this the
+    # curriculum would silently restart at step 0 on every resume. --resume_step always wins;
+    # as a best-effort default, fall back to parsing "agent_<N>.pt" (skrl's periodic-checkpoint
+    # naming). "best_agent.pt" has no step number and is intentionally left unresolved.
+    resume_step = args_cli.resume_step
+    if resume_step is None and resume_path:
+        match = re.search(r"agent_(\d+)\.pt$", os.path.basename(resume_path))
+        if match:
+            resume_step = int(match.group(1))
+            print(f"[INFO] --resume_step not given; inferred {resume_step} from checkpoint filename.")
+    if resume_step is not None and not resume_path:
+        logger.warning(
+            f"--resume_step={resume_step} was given without --checkpoint. The curriculum will start at "
+            f"step {resume_step} even though no weights are being resumed."
+        )
+    resume_step_msg = str(resume_step) if resume_step is not None else "0 (default — no --resume_step given/inferred)"
+
     # set the IO descriptors export flag if requested
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):
         env_cfg.export_io_descriptors = args_cli.export_io_descriptors
@@ -227,6 +258,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # Resume the velocity curriculum at the right stage (Problem 2 fix). Placed before the
+    # PPO/SAC branch below and before any wrapping so it applies identically to both algorithm
+    # paths. No-op (env.common_step_counter stays at its default 0) unless --resume_step was
+    # given or inferred above.
+    if resume_step is not None:
+        env.unwrapped.set_curriculum_step(resume_step)
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
@@ -349,6 +387,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         if resume_path:
             print(f"[INFO] Loading model checkpoint from: {resume_path}")
+            print(f"[INFO] Velocity curriculum resumed at step: {resume_step_msg}")
             agent.load(resume_path)
 
         trainer.train()
@@ -361,6 +400,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         if resume_path:
             print(f"[INFO] Loading model checkpoint from: {resume_path}")
+            print(f"[INFO] Velocity curriculum resumed at step: {resume_step_msg}")
             runner.agent.load(resume_path)
 
         runner.run()

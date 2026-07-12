@@ -26,13 +26,13 @@ class TimeoutAwareWrapper:
         if self._prev_obs is not None and truncated.any():
             infos["time_outs_obs"] = self._prev_obs.clone()
 
-        self._prev_obs = obs.clone() if isinstance(obs, torch.Tensor) else obs.clone()
+        self._prev_obs = obs.clone()
         return obs, reward, terminated, truncated, infos
 
     def reset(self, **kwargs):
         result = self.env.reset(**kwargs)
         obs = result[0] if isinstance(result, tuple) else result
-        self._prev_obs = obs.clone() if isinstance(obs, torch.Tensor) else None
+        self._prev_obs = obs.clone()
         return result
 
     def __getattr__(self, name):

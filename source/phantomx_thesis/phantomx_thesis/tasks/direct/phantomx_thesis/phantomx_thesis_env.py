@@ -41,11 +41,20 @@ class PhantomxThesisEnv(DirectRLEnv):
         # MP_BODY index for height measurement (physical body, 10cm above base_link)
         self._mp_body_idx, _ = self._robot.find_bodies(["MP_BODY"])
 
+        # Femur (j_thigh_*) joint indices — default pose has all 6 at +0.5 rad (see
+        # isaaclab_assets/robots/phantomx.py). Used by the femur-flip penalty below.
+        self._femur_joint_ids, _ = self._robot.find_joints(["j_thigh_.*"])
+
         # Tripod gait indices into the 6-element foot array (order: lf=0, lm=1, lr=2, rf=3, rm=4, rr=5)
         self._TRIPOD_A = [0, 4, 2]  # lf, rm, lr
         self._TRIPOD_B = [3, 1, 5]  # rf, lm, rr
 
         self._has_stood_up = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # Accumulator for the true (non-reward) average forward walking speed per episode —
+        # separate from _episode_sums, since it's a raw m/s measurement, not a reward term, and
+        # must be averaged over the actual number of steps taken, not the nominal episode length.
+        self._episode_speed_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # Logging
         self._episode_sums = {
@@ -65,6 +74,7 @@ class PhantomxThesisEnv(DirectRLEnv):
                 "foot_contact",
                 "tripod_gait",
                 "lazy_legs",
+                "femur_flip_l2",
             ]
         }
 
@@ -163,8 +173,15 @@ class PhantomxThesisEnv(DirectRLEnv):
         # joint torques penalty
         joint_torques = torch.sum(torch.square(self._robot.data.applied_torque), dim=1)
 
-        # joint acceleration penalty
-        joint_accel = torch.sum(torch.square(self._robot.data.joint_acc), dim=1)
+        # joint acceleration penalty — bestraft ruckartige/hektische Bewegung. Vor der Skalierung
+        # auf joint_accel_clamp gedeckelt: normale Bewegungsdynamik bleibt unclamped (voller
+        # Gradient), aber ein einzelner Physik-Instabilitäts-Spike kann den Batch nicht mehr
+        # vergiften wie vor dem Q-Divergenz-Fix (siehe clamp_reward — gleiches Prinzip, hier
+        # auf den Einzelterm statt auf die Summe angewendet).
+        joint_accel = torch.clamp(
+            torch.sum(torch.square(self._robot.data.joint_acc), dim=1),
+            max=self.cfg.joint_accel_clamp,
+        )
 
         # action rate penalty
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
@@ -190,6 +207,11 @@ class PhantomxThesisEnv(DirectRLEnv):
         forward_speed = self._robot.data.root_lin_vel_b[:, 0]
         movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
 
+        # Raw speed accumulation for the true average-forward-speed metric (nicht Teil des
+        # Rewards) — nur die x-Komponente (Vorwärtsrichtung), konsistent mit movement_penalty/
+        # commands[:, 0]. Kein seitlicher Anteil.
+        self._episode_speed_sum += forward_speed
+
         # Foot contact reward — bonus for stable tripod support base (≥3 feet on ground)
         foot_forces = self._contact_sensor.data.net_forces_w[:, self._die_body_ids, :]
         foot_contact_bool = torch.norm(foot_forces, dim=-1) > 1.0
@@ -204,6 +226,15 @@ class PhantomxThesisEnv(DirectRLEnv):
         # Lazy leg penalty — Beine die dauerhaft (>1s) in der Luft hängen
         current_air_times = self._contact_sensor.data.current_air_time[:, self._die_body_ids]
         lazy_legs = (current_air_times > 1.0).float().sum(dim=-1)
+
+        # Femur flip penalty — j_thigh_* steht per Default bei +0.5 rad. Rotiert ein Femur unter
+        # 0, kippt das Bein in eine anatomisch verkehrte Konfiguration ("Femur zeigt nach unten
+        # statt nach oben"), bei der die Tibia flach auf dem Boden liegt und nur noch geschleift
+        # statt normal aufgesetzt wird (beobachtet: 4/6 Beine korrekt, 2/6 gekippt). Bestraft nur
+        # die negative Auslenkung (relu), damit normale positive Federung/Schrittbewegung des
+        # Femurs beim Gehen nicht eingeschränkt wird.
+        femur_pos = self._robot.data.joint_pos[:, self._femur_joint_ids]
+        femur_flip_penalty = torch.sum(torch.clamp(-femur_pos, min=0.0), dim=-1)
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped  * self.cfg.lin_vel_reward_scale       * self.step_dt,
@@ -220,10 +251,25 @@ class PhantomxThesisEnv(DirectRLEnv):
             "foot_contact":         foot_contact_reward    * self.cfg.foot_contact_reward_scale   * self.step_dt,
             "tripod_gait":          tripod_score           * self.cfg.tripod_gait_reward_scale    * self.step_dt,
             "lazy_legs":           -lazy_legs              * self.cfg.lazy_leg_penalty_scale      * self.step_dt,
+            "femur_flip_l2":        femur_flip_penalty     * self.cfg.femur_flip_penalty_scale    * self.step_dt,
         }
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Clamp the total reward against rare physics-instability outliers (e.g. a single-step
+        # solver blow-up driving joint_acc/applied_torque to extreme, likely non-physical
+        # values — dof_acc_l2/dof_torques_l2 are unclamped squared terms, so one such step can
+        # dominate an entire off-policy replay batch). Deliberately clamps only the *summed*
+        # scalar, not the individual `rewards` dict entries below, so Episode_Reward/* logging
+        # stays unclamped and can still pinpoint which term actually spiked. SAC-only (see
+        # PhantomxThesisSACEnvCfg.clamp_reward) — PPO's reward path is unchanged by default.
+        if self.cfg.clamp_reward:
+            reward = torch.clamp(reward, -self.cfg.reward_clamp_value, self.cfg.reward_clamp_value)
+
+        if self.common_step_counter % 100 == 0:
+            for key, value in rewards.items():
+                print(f"{key:22s} min={value.min().item():8.3f}  mean={value.mean().item():8.3f}")
 
         for key, value in rewards.items():
             self._episode_sums[key] += value
@@ -268,6 +314,12 @@ class PhantomxThesisEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
+        # Capture the PRE-reset episode length now — super()._reset_idx() below and the manual
+        # randomization further down both overwrite episode_length_buf, so this is the only
+        # point where it still reflects how long the just-ended episode actually ran (needed to
+        # turn _episode_speed_sum into a true per-step average, not a length-normalized reward).
+        episode_steps = self.episode_length_buf[env_ids].clamp(min=1).float()
+
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
@@ -307,6 +359,15 @@ class PhantomxThesisEnv(DirectRLEnv):
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
 
+        # True average forward walking speed (m/s) over the episode that just ended — divided
+        # by the actual number of steps taken (episode_steps, captured before any reset
+        # touched episode_length_buf), not by the nominal max episode length like the reward
+        # terms above. A robot that dies after 1s at 5cm/s and one that walks 40s at 5cm/s both
+        # show ~0.05 here, unlike Episode_Reward/* which would differ a lot between the two.
+        avg_forward_speed = self._episode_speed_sum[env_ids] / episode_steps
+        extras["Metrics/avg_forward_speed_mps"] = torch.mean(avg_forward_speed)
+        self._episode_speed_sum[env_ids] = 0.0
+
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
 
@@ -340,22 +401,35 @@ class PhantomxThesisEnv(DirectRLEnv):
                 ).uniform_(-max_yaw, max_yaw)
             return
 
-        # SAC-Variante: sehr frühe fixe Phase, danach ein sich weitendes Zufallsfenster
-        # (fertig ab Step 100k statt Step 1.05M — bewusst andere, schnellere Zeitform).
-        if steps < 10_000:
+        # SAC-Variante: Zwei-Phasen-Curriculum "hoch → niedrig", invertiert ggü. PPO. Grund:
+        # bei sehr niedrigen Zielgeschwindigkeiten (movement_speed_x=0.05 für SAC) ist der
+        # exp(-error/kernel_width)-Tracking-Reward für Stillstand fast so hoch wie für echtes
+        # Laufen (z.B. exp(-0.03²/0.1) ≈ 0.991 bei Kommando 0.03 m/s) — kaum Lernanreiz,
+        # überhaupt loszulaufen. BOOTSTRAP_SPEED liegt deutlich über dem eigentlichen Ziel,
+        # damit der Reward-Unterschied zwischen Stehen und Laufen groß genug ist, um ein
+        # echtes Gangmuster zu erzwingen; Phase 2 transferiert dieses Gangmuster dann auf die
+        # tatsächliche Zielgeschwindigkeit herunter, statt sie von Null unter schwachem
+        # Gradienten zu lernen.
+        BOOTSTRAP_SPEED = 0.15   # m/s — unverifiziert, ob physisch komfortabel erreichbar
+                                # (Aktuator velocity_limit=0.8 rad/s in phantomx.py); in
+                                # TensorBoard (track_lin_vel_xy_exp, Episodenlänge) beobachten
+        if steps < 300_000:
+            self._commands[env_ids] = 0.0
+            self._commands[env_ids, 0] = BOOTSTRAP_SPEED
+        else:
             self._commands[env_ids] = 0.0
             self._commands[env_ids, 0] = max_speed
-        else:
-            progress = min(1.0, (steps - 10_000) / 90_000)
-            min_vel = max_speed * (1.0 - 0.8 * progress)
-            self._commands[env_ids] = 0.0
-            self._commands[env_ids, 0] = (
-                min_vel + torch.rand(len(env_ids), device=self.device) * (max_speed - min_vel)
-            )
             if max_yaw > 0:
                 self._commands[env_ids, 2] = torch.zeros_like(
                     self._commands[env_ids, 2]
                 ).uniform_(-max_yaw, max_yaw)
+
+    def set_curriculum_step(self, step: int) -> None:
+        """Override common_step_counter, z.B. um das Velocity-Curriculum nach einem Checkpoint-
+        Resume an der richtigen Stelle fortzusetzen (siehe train.py --resume_step). Wird nur
+        aufgerufen, wenn --resume_step explizit gesetzt ist — der normale Trainingspfad (Step 0,
+        kein Resume) ruft diese Methode nie auf und bleibt unverändert."""
+        self.common_step_counter = step
 
     def get_IO_descriptors(self) -> dict:
         return {

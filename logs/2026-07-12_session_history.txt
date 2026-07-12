@@ -1,0 +1,490 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-11 (Abend) bis 2026-07-12
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Direkte Fortsetzung von logs/2026-07-11_session_history.txt (gleicher Working Tree,
+keine neue Ausgangslage-Analyse nötig).
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. TOTE-PARAMETER-ANALYSE: phantomx_thesis_env.py vs. phantomx_thesis_env_cfg.py
+--------------------------------------------------------------------------------
+
+Auftrag: prüfen, ob movement_speed_x und alle Parameter tatsächlich in
+phantomx_thesis_env.py ankommen, oder irgendwo hartkodiert überschrieben werden.
+
+BEFUND (aktive Version zu diesem Zeitpunkt, vor den Änderungen dieser Session):
+  1. yaw_rotation_speed_x (0.0 rad/s) — komplett tot, nirgends referenziert.
+  2. movement_speed_x (0.10 m/s) — nur als Movement-Penalty-Schwellwert benutzt, NICHT als
+     Ziel-Geschwindigkeit. Das echte Velocity-Curriculum in _reset_idx() war komplett
+     hartkodiert unabhängig von der Cfg (100k-350k: rand()*0.5, >350k: 0.3→1.0 m/s).
+  3. joint_pos_limit (0.5235 rad, Kommentar "verhindert mechanisch gefährliche Posen") —
+     komplett tot, keine Clamp-Logik im Code vorhanden.
+  4. Hartkodierte obere Terminierungsgrenze: mp_body_height > 0.30, kein Cfg-Feld dafür.
+
+Zusätzlicher Fund: logs/merge_files/ enthielt eine bereits reparierte, aber nie nach
+source/ zurückkopierte Version (Kommentare datiert auf 09./10.07., "war vorher totes
+Config-Feld"). Dieser Fund deckt sich mit dem in Log 2026-07-11 dokumentierten
+Merge-Vorgang.
+
+
+--------------------------------------------------------------------------------
+2. YAW-CURRICULUM + GESCHWINDIGKEITS-ANPASSUNG EINGEBAUT
+--------------------------------------------------------------------------------
+
+User-Vorgabe: max. Geschwindigkeit 7 cm/s, Curriculum 100k-350k bei 0.035 m/s lernen,
+ab 350k bei 0.07 m/s + Yaw-Selbstkorrektur einbauen.
+
+UMGESETZT (phantomx_thesis_env_cfg.py):
+  movement_speed_x = 0.07 (vorher 0.10)
+  yaw_rotation_speed_x = 0.2 rad/s (~11°/s) — Wert per Nutzerentscheidung aus 3 Optionen
+    (0.2/0.35/0.5 rad/s) gewählt, konservativste Option.
+
+UMGESETZT (phantomx_thesis_env.py, _reset_idx-Curriculum-Block):
+  < 100k Schritte: Commands = 0
+  100k-350k: fix movement_speed_x/2 = 0.035 m/s
+  >= 350k: fix movement_speed_x = 0.07 m/s + Yaw uniform(-yaw_rotation_speed_x, +yaw_rotation_speed_x)
+
+Erkannter Nebeneffekt (zunächst nicht behoben): movement_penalty-Schwelle war fix gegen
+cfg.movement_speed_x (0.07) geprüft, unabhängig vom aktuell aktiven Curriculum-Kommando —
+in der 0.035-Phase dadurch fast dauerhaft aktiv.
+
+WICHTIG: Zwischen diesem Zeitpunkt und dem nächsten Schritt wurde phantomx_thesis_env.py/
+_env_cfg.py extern (durch User oder Linter) auf einen deutlich erweiterten Stand gebracht:
+PPO/SAC-Vereinheitlichung mit Feature-Flags (lin_vel_kernel_width, ang_vel_kernel_width,
+strict_action_pipeline, continuous_movement_penalty, use_sac_curriculum), neue
+PhantomxThesisSACEnvCfg-Subklasse. Die oben gemachten movement_speed_x/yaw_rotation_speed_x-
+Änderungen blieben darin erhalten (nur target_base_height wurde extern auf 0.15 geändert).
+
+
+--------------------------------------------------------------------------------
+3. MOVEMENT-PENALTY: CURRICULUM-KONSISTENT GEMACHT
+--------------------------------------------------------------------------------
+
+Der oben erkannte Nebeneffekt wurde gefixt: in _compute_movement_penalty() (bereits durch
+den externen Merge als eigene Methode mit continuous_movement_penalty-Flag vorhanden)
+prüft der binäre Zweig jetzt gegen command_speed (das aktuell aktive Curriculum-Kommando)
+statt gegen das fixe cfg.movement_speed_x. Ein-Zeilen-Fix, PPO-Verhalten dadurch spürbar
+konsistenter über alle drei Curriculum-Stufen.
+
+
+--------------------------------------------------------------------------------
+4. FOOT-REACH REWARD — HINZUGEFÜGT, DANN AUF WUNSCH WIEDER KOMPLETT ENTFERNT
+--------------------------------------------------------------------------------
+
+Neuer Reward-Term foot_reach_l2: Kontaktfüße sollten in einem Zielradius (zuletzt
+target_foot_reach=0.22, foot_reach_penalty_scale vom User mehrfach nachjustiert:
+-20 → -5 → -2 → -0.5 → -5.0) um den Körper bleiben, nur für Beine mit Bodenkontakt
+gewertet (Schwungphase unangetastet). Nach mehreren Iterationen zur Skalen-Findung
+(Herleitung über typische Größenordnung anderer Reward-Terme, ~0.0002-0.003/Step) hat
+der User sich entschieden, den kompletten Term wieder zu entfernen:
+  - target_foot_reach, foot_reach_penalty_scale aus env_cfg.py entfernt
+  - Berechnung, Reward-Dict-Eintrag, _episode_sums-Key aus env.py entfernt
+Ergebnis: beide Dateien wieder frei von jeder foot_reach-Referenz (verifiziert per grep).
+
+
+--------------------------------------------------------------------------------
+5. ERKLÄRUNGS-FRAGEN (keine Code-Änderung)
+--------------------------------------------------------------------------------
+
+- "Wie genau soll der Roboter Yaw-Korrektur lernen?" — Erklärt: kein Skript/PID, rein
+  reward-getrieben über den bereits vorhandenen track_ang_vel_z_exp-Term. Bis zum
+  Yaw-Curriculum-Fix war dieser Term faktisch wirkungslos, da commands[:,2] immer 0 war.
+- "Prüft tripod_gait_reward_scale auch, ob Beine sich bewegen, oder nur Kontakt?" —
+  Erklärt: nur Bodenkontakt (Kraftsensor), keine Bewegungs-/Zeitkomponente. Ein Roboter,
+  der dauerhaft in einer 3-3-Stellung stehen bleibt, bekäme den Reward trotzdem maximal.
+- "Ist das velocity curriculum alles, was wir an Curriculum-Learning haben?" — Bestätigt
+  ja: nur Geschwindigkeits-/Yaw-Kommando-Curriculum (PPO 3-Stufen, SAC 2-Stufen-Rampe).
+  Terrain-Curriculum und Reward-Scale-Curriculum (Optuna-Block) existieren nur als
+  auskommentierter, inaktiver Code.
+
+
+--------------------------------------------------------------------------------
+6. TRAIN.PY / PLAY.PY KONSISTENZ-PRÜFUNG — CURRICULUM-BUG IN PLAY.PY GEFUNDEN UND GEFIXT
+--------------------------------------------------------------------------------
+
+Auftrag: "passt unser aktuelles train.py auch zu unserem play.py? Policy hat gute Werte,
+sieht aber extrem weird aus beim Abspielen."
+
+BEFUND: common_step_counter (isaaclab/envs/direct_rl_env.py:195) startet bei jeder neuen
+Env-Instanz bei 0 und wird NICHT aus dem Checkpoint wiederhergestellt. play.py erzeugt für
+jede Play-Session eine frische Env — das Velocity-Curriculum lag dadurch die GESAMTE
+Play-Session über in der ersten Stufe (PPO: steps<100k → commands=0), unabhängig davon,
+wie weit das Training tatsächlich fortgeschritten war. Die Policy bekam beim Abspielen
+also ein Kommando, das sie seit dem sehr frühen Training kaum noch gesehen hat.
+
+Zweiter, SAC-spezifischer Befund (zu diesem Zeitpunkt nicht behoben, da User mit
+--algorithm PPO testete): play.py hat für SAC keinen eigenen Zweig, nutzt den generischen
+skrl-Runner statt CustomSAC/PhysicsBoundedActor — Checkpoint würde in eine andere
+Aktor-Architektur geladen als trainiert.
+
+FIX (play.py): direkt nach env-Erzeugung, vor jeglichem Wrapping:
+  env.unwrapped.common_step_counter = 1_000_000
+Setzt die Umgebung sofort in die gereifte Curriculum-Stufe. Deckt PPO und SAC gleichzeitig
+ab, da es am gemeinsamen Env-Code ansetzt.
+
+
+--------------------------------------------------------------------------------
+7. SAC TIEFENANALYSE — DREI PROBLEME AUS CODE-REVIEW, JEWEILS VERIFIZIERT VOR FIX
+--------------------------------------------------------------------------------
+
+Auftrag (strukturiert, mit Stopp-Gates nach Verifikation für Problem 1+2):
+
+  PROBLEM 1 — N-Step-Wrap-Around in NStepMemory (KRITISCH)
+  ----------------------------------------------------------
+  Verdacht: Sobald der Ringbuffer voll ist und überschrieben wird, kann
+  future_idx = (base_indexes + k*num_envs) % total_size in NStepMemory.sample() auf einen
+  uralten, überschriebenen Eintrag aus einer anderen Episode zeigen. still_going/done-Logik
+  fängt das NICHT ab (Done-Flag liegt am Ende der überschriebenen Episode, nicht an der
+  Wrap-Grenze).
+
+  VERIFIZIERT: valid_size = len(self) - (n_steps-1)*num_envs verhält sich vor dem ersten
+  Wrap korrekt (len(self) trackt den Schreibkopf exakt), wird aber ab filled=True KONSTANT
+  (= volle Kapazität) — die Ausschlusszone bleibt dann für immer an den physisch letzten
+  Zeilen des Tensors "kleben", während die echte Risikozone (Zeilen direkt vor dem
+  wandernden memory_index) unbeobachtet durch den Buffer wandert.
+  Konkrete Zahlen: Buffer füllt sich nach exakt 125.000 add_samples()-Aufrufen (16 Mio.
+  Transitionen bei num_envs=128). Ab da bleibt der Bug für die restlichen 87,5% des
+  1M-Step-Laufs aktiv. Pro Env sind zu jedem Zeitpunkt genau (n_steps-1)=2 von 125.000
+  Zeilen riskant → ~0,033 korrumpierte Samples pro 2048er-Batch (~1 von 30 Batches),
+  über den ganzen Lauf ~29.000 korrumpierte Transitionen von ~1,79 Mrd. (~0,0016%).
+  Einordnung: real, aber bei dieser Konfiguration statistisch klein — vermutlich nicht die
+  Hauptursache für beobachtete Trainingsprobleme, aber ein echter Korrektheitsfehler.
+
+  Unit-Test geschrieben und ausgeführt (source/phantomx_thesis/tests/
+  test_skrl_sac_memory_wraparound.py — bewusst AUSSERHALB des phantomx_thesis-Packages,
+  da dessen __init__.py-Kette via isaaclab_tasks nach pxr/USD importiert, was ohne
+  laufenden Isaac-Sim-Kit-Prozess nicht verfügbar ist). Test reproduzierte den Bug exakt:
+  Basiszeile mit eigenem Reward 2002 bekam 3-Step-Return 3919,57 zurück (= 2002 + γ*1003 +
+  γ²*1004, exakt die Rewards einer überschriebenen, fremden Episode 1).
+
+  FIX (nach Nutzerbestätigung, Option a): valid_size-Skalar durch dynamische
+  Zeilen-Gültigkeitsmaske ersetzt, die sich am tatsächlichen (wandernden) memory_index
+  orientiert statt an einer statischen Position. Pre-Fill-Verhalten exakt reproduziert
+  (mathematisch äquivalent hergeleitet und verifiziert), Post-Fill-Leck geschlossen.
+  Zusätzlicher Stresstest ergänzt (4 Envs, replacement=True, ~36 Wrap-Arounds, 10.240
+  Sample-Prüfungen) — alle 3 Tests grün.
+
+  PROBLEM 2 — Curriculum-Counter beim Checkpoint-Resume nicht wiederhergestellt (KRITISCH
+  für Resume)
+  ----------------------------------------------------------
+  VERIFIZIERT: Agent.load() (skrl/agents/torch/base.py) iteriert ausschließlich über
+  checkpoint_modules (Modelle/Optimizer/Preprocessors) — keinerlei Referenz auf die Env.
+  train.py ruft an beiden Stellen (PPO-Runner, CustomSAC) nur agent.load(resume_path) auf,
+  common_step_counter wird nirgends berührt. Bestätigt: identisches Problem wie in play.py
+  (Punkt 6), aber für Resume noch gravierender (Trainingsfortschritt selbst betroffen).
+
+  FIX (nach Nutzerbestätigung):
+    - Neues --resume_step INT (Default None) in train.py.
+    - Best-Effort-Fallback: falls nicht gesetzt, aus "agent_<N>.pt"-Dateinamen geparst
+      (regex), NIE erzwungen. "best_agent.pt" (kein Schrittwert im Namen) bleibt
+      unaufgelöst.
+    - Angewendet via neuer Methode PhantomxThesisEnv.set_curriculum_step(step) — rein
+      additiv, wird nur bei explizitem --resume_step aufgerufen. Normalpfad (kein Resume)
+      bit-identisch zum bisherigen Verhalten, per isoliertem Diff verifiziert.
+    - Logging beim Resume: Checkpoint-Pfad UND gesetzter Curriculum-Step.
+    - Warnung (kein Hard-Error) falls --resume_step ohne --checkpoint gesetzt wird.
+
+  PROBLEM 3 — Toter Code in TimeoutAwareWrapper (kleiner Bugfix)
+  ----------------------------------------------------------
+  `obs.clone() if isinstance(obs, torch.Tensor) else obs.clone()` in step() — beide Zweige
+  identisch, else-Zweig hätte bei Nicht-Tensor gecrasht statt sauber None zu setzen (wie in
+  reset()). Entscheidung: obs ist in diesem Wrapper strukturell IMMER ein torch.Tensor
+  (Docstring fixiert Nutzung ausschließlich nach SkrlVecEnvWrapper mit ml_framework=torch;
+  TimeoutAwareWrapper wird in train.py nur im SAC-Zweig instanziiert, kein Jax-Pfad für
+  CustomSAC/PhysicsBoundedActor vorhanden; PhantomxThesisEnv hat reinen Box-Observation-
+  Space, kein Dict/Multi-Agent). isinstance-Prüfung in BEIDEN Methoden (step UND reset)
+  entfernt statt nur in einer geflickt — echte Konsistenz statt Teilfix.
+
+Geänderte/neue Dateien: agents/skrl_sac_memory.py, tests/test_skrl_sac_memory_wraparound.py
+(neu), scripts/skrl/train.py, phantomx_thesis_env.py (nur set_curriculum_step, additiv),
+agents/timeout_wrapper.py.
+
+
+--------------------------------------------------------------------------------
+8. TRAININGSSTART-BEFEHL — TASK-ID-FEHLER AUS LOG 2026-07-09 KORRIGIERT
+--------------------------------------------------------------------------------
+
+User bat um den Startbefehl für SAC-Training. Beim Abgleich mit dem in Log 2026-07-09
+dokumentierten Diagnose-Befehl aufgefallen: dieser nutzte
+`--task Template-Phantomx-Thesis-Direct-v0` (PPO-Task-ID) zusammen mit `--algorithm SAC`.
+Das war vermutlich vor dem inzwischen eingebauten is_sac_env_cfg-Guard in train.py korrekt,
+würde mit dem heutigen Code aber sofort mit ValueError abbrechen (PPO-Task-ID zeigt auf
+PhantomxThesisEnvCfg, nicht PhantomxThesisSACEnvCfg).
+
+Korrekter Befehl:
+  cd /workspace/projects/phantomx_thesis
+  /workspace/isaaclab/isaaclab.sh -p scripts/skrl/train.py \
+    --task Template-Phantomx-Thesis-SAC-Direct-v0 \
+    --algorithm SAC \
+    --num_envs 128 \
+    --headless
+
+Vorab geprüft: skrl_sac_cfg.yaml timesteps=1000000 (nicht der 200k-Diagnosewert aus
+07-09), num_envs=128 passt zu memory_size=125000-Annahme, kein --agent nötig (Default-
+Resolution zeigt bei --algorithm SAC bereits auf skrl_sac_cfg_entry_point).
+
+User startete daraufhin einen Lauf: 2026-07-11_20-57-27_sac_torch (siehe Punkt 10/11).
+
+
+--------------------------------------------------------------------------------
+9. AUFTRAG "RETURN NORMALIZER WIEDERHERSTELLEN" — PRÄMISSE WIDERLEGT, NICHT UMGESETZT
+--------------------------------------------------------------------------------
+
+User-Auftrag: Q1(min) erreiche -101 bei Step 50k; frühere Divergenz (bis 2e+18) sei
+"damals durch einen Return Normalizer aus dem RSL-RL-SAC-Paper (arxiv:2605.24975) gelöst"
+worden, beim Umbau auf CustomSAC+NStepMemory verloren gegangen, solle wiederhergestellt
+werden.
+
+VERIFIKATION (Schritt 1, wie beauftragt):
+  - Code-Pfad bestätigt: target_values in CustomSAC.update() (skrl_sac_agent.py:150) nutzt
+    sampled_rewards unverändert, keine Normalisierung. rewards_shaper bestätigt inaktiv
+    (Key fehlt in YAML, Default None, sowohl bei skrl's Basis-SAC als auch bei
+    CustomSAC.record_transition() geprüft).
+  - ABER: vollständige Git-Historie (alle Commits, komplette Diffs durchsucht) und alle
+    3 vorherigen Session-Logs zeigen durchgängig NUR "4 Fixes" (physics-bounded actions,
+    Weight-Init, N-Step-Returns, Timeout-aware Bootstrapping) — nirgends ein "Fix 5"/
+    "Return Normalizer", nirgends die arxiv-ID 2605.24975.
+  - Log 2026-07-09 (Zeilen 331-395) dokumentiert die ECHTE Historie des zitierten
+    Q1=2e+18-Vorfalls (Run 2026-06-25_23-01-57_sac_torch): dieser lief "noch mit altem
+    class:SAC, VOR den 4 Fixes". Eigene damalige Schlussfolgerung: "Nicht die Custom-SAC-
+    Architektur zurückbauen (sie behebt ein real aufgetretenes, katastrophales Problem —
+    Q1-Divergenz)" — die 4-Fixes-Architektur SELBST war die damalige Lösung, kein
+    zusätzlicher Normalizer. Diese Architektur ist im aktuellen Code vollständig vorhanden.
+
+ENTSCHEIDUNG: Prämisse als nicht belegt zurückgewiesen, Schritt 2/3 (Normalizer-
+Implementierung) NICHT umgesetzt. Zusätzlich angemerkt: die aktuelle Zahl (Q1=-101,
+negativ) unterscheidet sich in Vorzeichen und Größenordnung deutlich von der historischen
+(+2e+18) — "denselben alten Fix wiederherstellen" wäre auch bei belegter Prämisse kein
+automatisch richtiger Schluss gewesen. Dem User zwei Wege vorgeschlagen: (1) konkrete
+Quelle für den Normalizer nachliefern, oder (2) frische, evidenzbasierte Diagnose vom
+tatsächlichen Code/den Logs aus. User wählte (2), siehe Punkt 10.
+
+
+--------------------------------------------------------------------------------
+10. TENSORBOARD-ZEITREIHEN-DIAGNOSE DER Q-DIVERGENZ (Weg 2)
+--------------------------------------------------------------------------------
+
+Analysiert: Lauf 2026-07-11_20-57-27_sac_torch (Steps 10k-50k, passt exakt zur vom User
+zitierten Q1=-101-Angabe), via tensorboard.backend.event_processing.event_accumulator
+(Isaac-Sim-Python: /isaac-sim/python.sh, normales pytest/python3 nicht verfügbar in dieser
+Sandbox).
+
+Werte-Tabelle (10k/20k/30k/40k/50k):
+  Target (min):        -1299 / -1326 / -1318 / -1316 / -1313
+  Target (max):           36 /    54 /    89 /    95 /    98
+  Q1 (min):             -62.6 / -94.3 / -97.3 / -95.1 / -101.7
+  Reward (min):        -1281 / -1147 /  -907 /  -476 /  -447
+  Reward (max):          0.44 /  0.43 /  0.42 /  0.42 /  0.38
+  Entropy coeff (α):    0.37 /  0.12 / 0.082 / 0.077 / 0.071
+  Entropy loss:        -17.9 /  -7.7 / -0.007 / -0.02 / -0.03
+  Critic loss:            229 /   241 /   212 /   171 /   144
+  Episode-Länge (Ø):    42.6 /  20.6 /  17.6 /  17.9 /  14.7 Steps
+
+BEFUND: Reward(min) ≈ -1281 ist SCHON beim allerersten Logpunkt (Step 10k, ~2000
+Gradientenschritte nach learning_starts=8000) da und erklärt Target(min) fast 1:1
+(Bootstrap-Anteil γⁿ*target_q ist dagegen klein). Kein Bootstrapping-/Critic-Update-Fehler
+— der Critic regressiert korrekt gegen ein bereits vergiftetes Ziel; Q1(min) wird sichtbar
+darauf zugezogen (-63→-95→-97→-95→-102), ohne es ganz zu erreichen (grad_norm_clip=0.5).
+Seltener Ausreißer, keine systemische Explosion: Reward(mean)/Target(mean)/Target(max)
+sehen komplett normal aus — bei batch_size=2048 reicht 1 Ausreißer-Sample, um "min" massiv
+zu verzerren, ohne den Mittelwert sichtbar zu bewegen.
+Entropie-Terme (Verdächtige 1/2) zeitlich entlastet: α fällt schnell aber normal ein,
+Entropy-Loss konvergiert glatt gegen ~0 ab Step 30k — der vergiftete Reward ist aber schon
+beim allerersten Logpunkt da, während α noch in der normalen Anfangsanpassung steckt.
+Kandidat für die Quelle: Episode_Reward/dof_acc_l2 sticht unter allen Einzeltermen mit
+Abstand am stärksten negativ heraus (bis -2, alle anderen ≤-0.06) — plausibelster Kanal für
+einen Physik-Instabilitäts-Spike (unclampte quadrierte joint_acc-Werte). NICHT hart
+bestätigt: kein mitgeschriebenes Stdout/Physik-Warning-Log für diesen Lauf gefunden
+(hydra.log enthält nur eine harmlose IO-Descriptor-Warnung). Extrem kurze Episoden
+(Ø 15-43 Steps ≈ 0,3-0,85s) als unterstützendes Indiz für gelegentliche frühe
+Instabilität vermerkt.
+
+
+--------------------------------------------------------------------------------
+11. REWARD-CLAMP FIX (SAC-only)
+--------------------------------------------------------------------------------
+
+User schlug vor, joint_acc/applied_torque bei Ausreißern auf 0 zu setzen. Alternative
+empfohlen und umgesetzt: Clamp des GESAMTEN Rewards statt einzelner Terme — robuster
+(fängt auch unbekannte künftige Ausreißerquellen), verliert kein Signal komplett (nur
+Größenordnung gedeckelt statt genullt).
+
+UMGESETZT:
+  - phantomx_thesis_env_cfg.py: clamp_reward: bool = False + reward_clamp_value: float =
+    20.0 in der Basis-Cfg (PPO unangetastet), clamp_reward = True in
+    PhantomxThesisSACEnvCfg (Begründung: off-policy Replay ist anfällig für einzelne
+    Ausreißer-Samples, die einen ganzen Batch dominieren — PPO's on-policy Rollouts mitteln
+    das pro Update weg).
+  - phantomx_thesis_env.py: reward = torch.clamp(reward, -20, 20) direkt nach dem
+    bestehenden nan_to_num, nur wenn cfg.clamp_reward aktiv.
+  - Bewusst NUR der summierte Scalar geclampt, NICHT die einzelnen rewards-Dict-Einträge —
+    Episode_Reward/dof_acc_l2 etc. bleiben unclamped, damit in künftigen Läufen weiter
+    sichtbar bleibt, welcher Term tatsächlich der Übeltäter ist.
+  - 20.0 empirisch aus den Daten gewählt (schlechtester normaler Reward(mean) lag bei
+    ca. -2.1), kein hartes physikalisches Limit — als Startwert im Kommentar markiert.
+
+Nächster geplanter Check (noch nicht durchgeführt): neuen SAC-Lauf starten, nach ~50k
+Steps dieselbe Tabelle ziehen — Target(min)/Q1(min) sollten jetzt nahe ±20 bleiben statt
+Richtung -1300 zu laufen. Falls Episode_Reward/dof_acc_l2 weiterhin klar dominanter
+Ausreißer ist, wäre die Hypothese bestätigt und ein gezielterer Fix (joint_acc selbst
+clampen) der nächste Schritt.
+
+
+--------------------------------------------------------------------------------
+12. FEMUR-FLIP PENALTY (neuer Reward-Term, PPO + SAC)
+--------------------------------------------------------------------------------
+
+User-Beobachtung: in bisherigen Trainingsdurchgängen checkt das Modell nicht, dass alle
+Femur-Glieder "nach oben" zeigen sollten — teils 4/6 korrekt, 2/6 zeigen "nach unten",
+wodurch die Tibia flach auf dem Boden aufliegt und geschleift wird (katastrophale Folgen).
+
+RECHERCHE: isaaclab_assets/robots/phantomx.py zeigt Default-Pose der Femur-Gelenke
+(j_thigh_*) bei +0.5 rad für alle 6 Beine. Da strict_action_pipeline für PPO standardmäßig
+False ist, wird das Joint-Target dort NICHT auf joint_pos_limit geklemmt (nur bei SAC) —
+eine Gaussian-Aktion kann das Femur-Target durchaus unter 0 drücken und damit kinematisch
+umkippen.
+
+UMGESETZT (beide Dateien, Basis-Cfg → gilt für PPO UND SAC, da echtes Gait-Design-Problem,
+kein SAC-spezifischer Stabilitäts-Patch):
+  - phantomx_thesis_env.py __init__: self._femur_joint_ids via
+    self._robot.find_joints(["j_thigh_.*"])
+  - _get_rewards(): femur_pos = joint_pos[:, femur_joint_ids]; Penalty =
+    sum(relu(-femur_pos)) — nur negative Auslenkung bestraft (kontinuierlich, kein
+    Binärflag), positive Bewegung beim normalen Gehen bleibt unangetastet.
+  - Neuer Dict-Eintrag "femur_flip_l2" + _episode_sums-Key.
+  - env_cfg.py: femur_flip_penalty_scale = -5.0 in der Basis-Cfg (Startwert, per
+    Episode_Reward/femur_flip_l2 zu beobachten).
+
+VORBEHALT (dem User explizit mitgeteilt): der "Umkipp-Winkel" von exakt 0 rad wurde NICHT
+visuell/kinematisch verifiziert (kein Rendering in dieser Sandbox verfügbar) — begründete,
+aber unbestätigte Annahme basierend auf dem mechanischen Nullpunkt des Gelenks.
+
+Nachfrage des Users beantwortet: sowohl femur_flip_l2 als auch height_tracking
+(target_base_height) sind bereits von Step 0 an mit voller Stärke aktiv — common_step_
+counter beeinflusst in der gesamten Env ausschließlich die Velocity-/Yaw-Kommandos in
+_apply_velocity_curriculum(), sonst nichts.
+
+
+--------------------------------------------------------------------------------
+13. FINALER SANITY-CHECK VOR NÄCHSTEM TRAININGSLAUF
+--------------------------------------------------------------------------------
+
+Vor dem Start eines neuen SAC-Laufs (mit Reward-Clamp + Femur-Flip-Penalty) nochmal
+geprüft: clamp_reward korrekt False/True für PPO/SAC getrennt, femur_flip_penalty_scale
+gesetzt, skrl_sac_cfg.yaml timesteps weiterhin 1000000, alle heute geänderten Dateien
+kompilieren fehlerfrei (py_compile), alle 3 NStepMemory-Regressionstests weiterhin grün.
+Empfehlung: FRISCHER Lauf (kein --checkpoint/--resume_step), da die Reward-Funktion selbst
+verändert wurde (Clamp + neuer Term) — ein Resume von einem alten Checkpoint wäre
+inkonsistent mit der neuen Reward-Ökonomie, und der Replay-Buffer wird beim Resume ohnehin
+nicht wiederhergestellt.
+
+
+--------------------------------------------------------------------------------
+14. FOLGE-DIAGNOSE Q-DIVERGENZ NACH REWARD-CLAMP — VOM USER EINGEBRACHT, NUR PROTOKOLLIERT
+--------------------------------------------------------------------------------
+
+Nach dem in Punkt 11 empfohlenen neuen Lauf hat der User eine eigene Diagnose-Historie
+mit neuen Messwerten vorgelegt (nicht in dieser Session selbst erhoben — hier nur für die
+Vollständigkeit übertragen, NICHT von Claude Code in dieser Session verifiziert oder
+umgesetzt).
+
+Symptom weiterhin vorhanden, aber verändert: Q1(min) = -101 bei Step 50k, KEINE Explosion
+ins Positive wie beim historischen 2e+18-Vorfall (anderes Vorzeichen/Größenordnung — vom
+User selbst als vermutlich anderes Problem eingeordnet).
+
+Neue Messwerte (Step 50k): Q1 max/mean/min = 122 / -11 / -52; Targets = 109 / -11 / -87;
+N-Step-Return (sampled_rewards) = 5 / -24 / -253; critic_loss=30; policy_loss=+11;
+entropy_loss=-0.028; alpha=0.0497. Instantaneous single-step reward: max/mean/min =
+0.42 / -0.93 / -20 — WICHTIG laut User: inst_min liegt FLACH bei -20 bereits ab dem ersten
+geloggten Punkt (10k), kein Drift dorthin.
+
+Auffällig (von Claude Code beim Übertragen bemerkt, nicht weiter untersucht): inst_min=-20
+trifft exakt den in Punkt 11 gesetzten reward_clamp_value=20.0 — der Clamp scheint aktiv
+zu greifen. Der N-Step-Return-min von -253 ist damit aber rechnerisch schwer vereinbar:
+selbst wenn alle 3 Steps einer Akkumulation am Clamp (-20) lägen, ergäbe das bestenfalls
+rund -20*(1+0.97+0.97²) ≈ -58, nicht -253. Ob dieser Lauf tatsächlich schon mit aktivem
+Clamp gefahren wurde, mit welchem reward_clamp_value, oder ob hier ein weiterer,
+unverifizierter Effekt vorliegt, ist NICHT geklärt — an dieser Stelle bewusst nur notiert,
+nicht aufgelöst.
+
+Vom User durchgearbeitete Thesen:
+  A) Fehlender Return Normalizer — WIDERLEGT (siehe Punkt 9 dieser Session, deckungsgleich).
+  B) N-Step-Wrap-Around-Bug (Punkt 7 dieser Session) — AUSGESCHLOSSEN für dieses Symptom:
+     der Bug kann frühestens bei Buffer-Volllauf (~125k) zuschlagen, die Divergenz beginnt
+     aber schon bei ~10-20k. Der Fix aus Punkt 7 bleibt trotzdem korrekt/nötig, ist hier nur
+     nicht die Ursache.
+  C) Entropie-Term treibt die Targets — WIDERLEGT durch Messung: alpha=0.05 ist zu klein,
+     um Targets von ±90 zu erklären (selbst bei next_log_prob~10-20 nur Beitrag ~1).
+  D) Unclamped dof_acc_l2/dof_torques_l2 (Physik-Blowup-Ausreißer, siehe Punkt 10 dieser
+     Session) — TEILWEISE WIDERLEGT: Mechanismus bleibt plausibel, aber ein Blowup-
+     getriebener Ausreißer müsste STEIGEND oder SPORADISCH sein; beobachtet wird ein
+     FLACHES -20 bereits ab dem allerersten Punkt — passt eher zu einem STRUKTURELLEN,
+     posen-abhängigen Term als zu Instabilitäts-Spitzen. Damit zurückgestuft.
+
+Neue Hauptvermutung des Users (NICHT bewiesen): femur_flip_penalty (Punkt 12 dieser
+Session, scale=-5.0) als primärer Verdächtiger — hängt rein von der Pose ab (nicht von
+Physik-Instabilität), kann daher schon mit der zufälligen Anfangspolicy ab Step 1 konstant
+feuern, wenn mehrere Femurs bei Zufallsinitialisierung unter 0 rad stehen. Passt zur
+beobachteten FLACHEN Charakteristik. dof_acc_l2/dof_torques_l2 weiterhin sekundär im
+Verdacht.
+
+Vom User explizit als offen/unverifiziert markiert: der fehlende Beweis wäre der
+Instantaneous-MIN der EINZELNEN Reward-Terme (nicht deren Episoden-Mittel, welches den
+Ausreißer verdeckt) — vorgeschlagen als nächster Schritt: ein temporärer Debug-Print in
+_get_rewards() über rewards.items() (value.min()/value.mean() pro Term, alle 100 Steps),
+NUR zur Verifikation, danach wieder zu entfernen. Fix-Optionen erst NACH dieser
+Verifikation zu wählen: (a) Scale des Täter-Terms senken, (b) Term einzeln vor der Summe
+clampen, (c) bestehenden clamp_reward/reward_clamp_value schärfer stellen (inkl. Prüfung,
+ob er im aktuell gelaufenen Lauf überhaupt aktiv war), (d) Clamp auf den akkumulierten
+N-Step-Return im NStepMemory statt auf den Single-Step-Reward.
+
+STATUS: Diese Folge-Diagnose wurde in dieser Session ausschließlich zur Vollständigkeit
+protokolliert. Weder der Debug-Print noch ein Fix wurden umgesetzt — das ist der nächste
+Schritt für die kommende Session (siehe Punkt 16).
+
+
+--------------------------------------------------------------------------------
+15. GEÄNDERTE/NEUE DATEIEN DIESER SESSION (nichts committed, alles im Working Tree)
+--------------------------------------------------------------------------------
+
+Geändert:
+  scripts/skrl/train.py                     (--resume_step, Task-ID-Hinweis dokumentiert)
+  scripts/skrl/play.py                       (common_step_counter-Force auf Curriculum-Reife)
+  source/.../phantomx_thesis_env.py          (Curriculum, Movement-Penalty-Fix, foot_reach
+                                               hinzugefügt+entfernt, set_curriculum_step,
+                                               Reward-Clamp, femur_flip_l2)
+  source/.../phantomx_thesis_env_cfg.py      (movement_speed_x/yaw_rotation_speed_x,
+                                               foot_reach-Felder hinzugefügt+entfernt,
+                                               clamp_reward/reward_clamp_value,
+                                               femur_flip_penalty_scale)
+  source/.../agents/skrl_sac_memory.py       (N-Step-Wrap-Around-Fix)
+  source/.../agents/timeout_wrapper.py       (toter isinstance-Check entfernt)
+
+Neu:
+  source/phantomx_thesis/tests/test_skrl_sac_memory_wraparound.py  (3 Tests, alle grün)
+
+
+--------------------------------------------------------------------------------
+16. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. AKTUELLSTER PUNKT (Punkt 14): Per-Term-min/mean-Debug-Print in _get_rewards() einbauen
+   (nur Diagnose, danach wieder entfernen) und damit verifizieren, welcher Reward-Term den
+   flachen inst_min≈-20 seit Step 10k erzeugt — Hauptverdächtiger femur_flip_penalty,
+   sekundär dof_acc_l2/dof_torques_l2. ERST danach Fix wählen (Optionen a-d in Punkt 14).
+2. Ungeklärt aus Punkt 14: ob/mit welchem reward_clamp_value der zuletzt vom User
+   analysierte Lauf tatsächlich gefahren wurde — der beobachtete N-Step-Return-min (-253)
+   ist mit dem in Punkt 11 gesetzten ±20-Clamp rechnerisch kaum vereinbar. Vor der nächsten
+   Diagnose klären, welcher Cfg-Stand für welchen Lauf aktiv war.
+3. femur_flip_penalty_scale=-5.0 und die Schwelle "0 rad = Umkipp-Punkt" sind weiterhin
+   unverifizierte Startwerte — nach einem Play/Video-Lauf mit sichtbarem Roboterverhalten
+   abgleichen und ggf. nachjustieren.
+4. play.py hat weiterhin keinen CustomSAC-Ladepfad (seit Log 07-09 offen, in Punkt 6 dieser
+   Session erneut bestätigt) — nötig für SAC-Checkpoints, die mit --algorithm SAC
+   trainiert wurden. Aktuell nur für --algorithm PPO verifiziert getestet.
+5. Kein Git-Commit dieser Session angelegt (wie schon in Log 07-11 empfohlen, weiterhin
+   offen) — würde künftige Rollbacks deutlich robuster machen.
+
+================================================================================

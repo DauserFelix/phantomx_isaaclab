@@ -121,7 +121,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     episode_length_s = 40.0
     decimation = 4
     action_scale = 0.5        # Policy gibt direkte ±0.5 rad Abweichung von Default-Pose
-    joint_pos_limit: float = 0.5235  # ±30° um Default-Stellung (π/6) — verhindert mechanisch gefährliche Posen
+    joint_pos_limit: float = 0.7854  #0.7854=45grad #0.5235  # ±30° um Default-Stellung (π/6) — verhindert mechanisch gefährliche Posen
     action_space = 18  # PhantomX: 6 legs × 3 joints = 18 DOF
 
     # Observation space:
@@ -213,8 +213,8 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.12    # MP_BODY at normal standing height (~20cm above ground)
-    movement_speed_x = 0.07      # 7 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.07 m/s)
+    target_base_height = 0.10    # MP_BODY at normal standing height (~20cm above ground)
+    movement_speed_x = 0.075     # 7.5 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.075 m/s)
     yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
 
     # =====================================================
@@ -226,6 +226,10 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     strict_action_pipeline: bool = False  # True: Actions vor Nutzung auf [-1,1] und q_def±joint_pos_limit klemmen
     continuous_movement_penalty: bool = False  # True: kontinuierlicher velocity-deficit statt binärer Penalty
     use_sac_curriculum: bool = False      # True: schnellere, kommandorandomisierte Rampe statt 100k/350k-Stufen
+    clamp_reward: bool = False            # True: Gesamt-Reward auf ±reward_clamp_value geklemmt (Schutz vor
+                                           # seltenen Physik-Instabilitäts-Ausreißern, die sonst einzelne
+                                           # Replay-Buffer-Samples dominieren — siehe Q1(min)-Divergenz-Diagnose)
+    reward_clamp_value: float = 20.0      # nur wirksam wenn clamp_reward=True
 
     # =====================================================
     # REWARD SCALES - TUNED FOR HEXAPOD LOCOMOTION
@@ -238,13 +242,21 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
 
     # 🚫 PENALTIES (negative)
     z_vel_reward_scale = -2.0
-    ang_vel_reward_scale = -5
-    joint_torque_reward_scale = -2e-5   
+    ang_vel_reward_scale = -7.0
+    joint_torque_reward_scale = 0.0#-2e-5
+    # Gelenkbeschleunigungs-Strafe gegen hektische/ruckartige Bewegung. Startwert -2.5e-7
+    # (Original-PPO-Wert, siehe auskommentierter Optuna-Block unten) — jetzt sicher, weil
+    # joint_accel_clamp verhindert, dass ein Physik-Instabilitäts-Spike den Batch vergiftet
+    # (das war die eigentliche Ursache der früheren Q-Divergenz, nicht der Scale-Wert selbst).
+    # Für PPO und SAC bewusst gleich — kein separater SAC-Override mehr, um genau das
+    # "stille Überschreiben"-Bugmuster von vorhin nicht zu wiederholen.
     joint_accel_reward_scale = -2.5e-7
-    action_rate_reward_scale = -0.02    
+    joint_accel_clamp: float = 5.0e7    # Deckel auf sum(joint_acc²) VOR der Skalierung —
+                                          # Startwert, via Episode_Reward/dof_acc_l2 beobachten
+    action_rate_reward_scale = -0.02
     flat_orientation_reward_scale = -3.0
 
-    movement_penalty_scale = 10.0
+    movement_penalty_scale = 25.0       #10 hat gut funktioniert
 
     alive_reward_scale = 0.3
 
@@ -257,44 +269,15 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # 😴 LAZY LEG PENALTY — Strafe für Beine die >1s dauerhaft in der Luft hängen
     lazy_leg_penalty_scale = 0.5
 
-    # # =====================================================
-    # # Optuna Hyperparameter Tuning - Werte werden per Environment Variable gesetzt bzw angepasst (10.06.2025)
-    # # =====================================================
-    # # =====================================================
-    # # PRIMÄRE REWARDS — hardcoded, Optuna darf nicht ändern
-    # # =====================================================
-    # lin_vel_reward_scale: float = 15.0      # hoch und fest — Roboter MUSS laufen
-    # alive_reward_scale: float = 0.5         # moderat und fest
-    # height_reward_scale: float = 2.0        # fest — wichtig für Stabilität
-    # yaw_rate_reward_scale: float = 4.0      # fest
-
-    # # =====================================================
-    # # PENALTIES — hardcoded auf sichere Werte
-    # # =====================================================
-    # movement_penalty_scale: float = 0.0     # deaktiviert — lin_vel reicht
-    # z_vel_reward_scale: float = -2.0        # fest
-    # joint_accel_reward_scale: float = -2.5e-7  # fest
-
-    # # =====================================================
-    # # SEKUNDÄRE REWARDS — Optuna optimiert WIE der Roboter läuft
-    # # =====================================================
-    # flat_orientation_reward_scale: float = float(
-    #     os.environ.get("OPTUNA_ORIENTATION_SCALE", "-3.0")
-    # )
-    # joint_torque_reward_scale: float = float(
-    #     os.environ.get("OPTUNA_TORQUE_SCALE", "-2e-5")
-    # )
-    # action_rate_reward_scale: float = float(
-    #     os.environ.get("OPTUNA_ACTION_RATE_SCALE", "-0.02")
-    # )
-    # ang_vel_reward_scale: float = float(
-    #     os.environ.get("OPTUNA_ANG_VEL_SCALE", "-5.0")
-    # )
+    # 🕷️ FEMUR FLIP PENALTY — bestraft Femur-Gelenke (j_thigh_*), die unter 0 rad rotieren und
+    # damit in die anatomisch verkehrte Richtung kippen (Default +0.5 rad = "zeigt nach oben").
+    # Startwert — via Episode_Reward/femur_flip_l2 in TensorBoard beobachten und ggf. nachjustieren.
+    femur_flip_penalty_scale = -5.0
 
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
-    termination_height = 0.1    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
+    termination_height = 0.07    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
     termination_tilt = 0.04     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
 
 
@@ -310,20 +293,31 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.15
-    movement_speed_x = 0.05
+    target_base_height = 0.10
+    movement_speed_x = 0.075
     yaw_rotation_speed_x = 0.0
 
-    joint_torque_reward_scale = -5e-6    # 4x abgeschwächt ggü. PPO — bestraft nicht zwischen
-                                          # notwendigem Kraftaufwand und Zittern
-    joint_accel_reward_scale = -2.5e-5   # deutlich hochgesetzt ggü. PPO — schärferer Proxy für
-                                          # Ruckartigkeit, uebernimmt Hauptrolle fuer Smoothness
+    # joint_torque_reward_scale / joint_accel_reward_scale: kein eigener SAC-Override mehr —
+    # beide erben jetzt bewusst denselben (geklemmten, sicheren) Wert aus der Basisklasse
+    # (siehe dortige Kommentare). Ein separater, stiller Override war zuvor die Ursache eines
+    # eigenen Bugs (Config-Änderung an der Basis griff für SAC nicht).
 
     termination_height = 0.07
 
-    lin_vel_kernel_width = 0.1   # enger als PPO-Default 0.25 — differenziert Stillstehen klarer
-    ang_vel_kernel_width = 0.1   # von Tracking, auch bei kleinen Curriculum-Kommandos
+    # lin_vel_kernel_width nochmal deutlich verengt (0.1 → 0.005): bei movement_speed_x=0.05 gab
+    # 0.1 komplettem Stillstand (error=command=0.05) noch exp(-0.05²/0.1)=exp(-0.025)≈0,975 —
+    # 97,5% des maximalen Tracking-Rewards fürs Nichtstun, praktisch kein Anreiz zu laufen (live
+    # in der Simulation bestätigt: Roboter steht, bewegt sich kaum). Bei 0.005 sinkt derselbe
+    # Stillstand-Fall auf exp(-0.05²/0.005)=exp(-0.5)≈0,61 — deutlich sichtbare Lücke zu echtem
+    # Tracking (~0,96-0,98 bei 80% Zielgeschwindigkeit) — Startwert, mit avg_forward_speed_mps
+    # in TensorBoard beobachten.
+    lin_vel_kernel_width = 0.005
+    ang_vel_kernel_width = 0.1   # unverändert — für SAC aktuell wirkungslos (yaw_rotation_speed_x=0,
+                                  # commands[:,2] immer 0), nicht Teil des Geh-Problems
 
     strict_action_pipeline = True        # Actions vor Nutzung klemmen (siehe PhantomxThesisEnvCfg)
     continuous_movement_penalty = True   # kontinuierlicher velocity-deficit statt binaerer Penalty
     use_sac_curriculum = True            # schnellere, kommandorandomisierte Rampe (fertig ab 100k)
+    clamp_reward = True                  # off-policy Replay ist anfällig für einzelne Ausreißer-Samples,
+                                          # die einen ganzen Batch dominieren (PPO's on-policy Rollouts
+                                          # mitteln das pro Update weg) — siehe Q1(min)=-101-Diagnose

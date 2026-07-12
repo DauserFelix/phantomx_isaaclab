@@ -14,7 +14,6 @@ a more user-friendly way.
 
 import argparse
 import sys
-from unittest import runner
 
 from isaaclab.app import AppLauncher
 
@@ -116,6 +115,21 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import phantomx_thesis.tasks  # noqa: F401
 
+# Custom SAC components — must mirror train.py's SAC branch. play.py previously fell through
+# to the generic skrl Runner for every algorithm, which builds a plain GaussianMixin policy
+# from skrl_sac_cfg.yaml instead of PhysicsBoundedActor, and doesn't know the "NStepMemory"
+# component name at all (ValueError: Component 'NStepMemory' is not supported in the runner
+# cfg). A SAC checkpoint needs the exact same custom classes it was trained with.
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_models import (
+    PhysicsBoundedActor,
+    SACCritic,
+    compute_action_scaling_direct,
+    get_sac_hidden_dims,
+)
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_memory import NStepMemory
+from phantomx_thesis.tasks.direct.phantomx_thesis.agents.skrl_sac_agent import CustomSAC
+from phantomx_thesis.tasks.direct.phantomx_thesis.phantomx_thesis_env_cfg import PhantomxThesisSACEnvCfg
+
 # If an explicit checkpoint is given but no algorithm was specified, auto-detect from the
 # checkpoint's saved params/agent.yaml so the correct model architecture is loaded.
 if args_cli.checkpoint and args_cli.algorithm == "PPO" and args_cli.agent is None:
@@ -185,6 +199,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
+    # guard against playing the wrong algorithm against the wrong task variant — mirrors the
+    # same check in train.py. Without this, --algorithm SAC against the PPO task ID would
+    # silently build the custom SAC actor/critics against PhantomxThesisEnvCfg's reward
+    # economy instead of PhantomxThesisSACEnvCfg's, and vice versa.
+    is_sac_env_cfg = isinstance(env_cfg, PhantomxThesisSACEnvCfg)
+    if algorithm == "sac" and not is_sac_env_cfg:
+        raise ValueError(
+            f"--algorithm SAC requires the SAC task variant (env_cfg must be PhantomxThesisSACEnvCfg, "
+            f"got {type(env_cfg).__name__}). Use --task Template-Phantomx-Thesis-SAC-Direct-v0."
+        )
+    if algorithm != "sac" and is_sac_env_cfg:
+        raise ValueError(
+            f"--algorithm {args_cli.algorithm} was requested against the SAC task variant "
+            f"({type(env_cfg).__name__}). Use --task Template-Phantomx-Thesis-Direct-v0 for {args_cli.algorithm}."
+        )
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
@@ -223,18 +253,94 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`
 
-    # configure and instantiate the skrl runner
-    # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
     experiment_cfg["trainer"]["close_environment_at_exit"] = False
     experiment_cfg["agent"]["experiment"]["write_interval"] = 0  # don't log to TensorBoard
     experiment_cfg["agent"]["experiment"]["checkpoint_interval"] = 0  # don't generate checkpoints
-    runner = Runner(env, experiment_cfg)
 
-    print(f"[INFO] Loading model checkpoint from: {resume_path}")
-    runner.agent.load(resume_path)
-    # set agent to evaluation mode
-    # runner.agent.set_running_mode("eval")
-    runner.agent.training = False
+    if algorithm == "sac":
+        # ------------------------------------------------------------------ #
+        #  Custom SAC — must mirror train.py's construction exactly, or the   #
+        #  checkpoint gets loaded into a different actor/critic architecture  #
+        #  than it was trained with (wrong action bounds, wrong squashing).   #
+        # ------------------------------------------------------------------ #
+        device = env.device
+        obs_space = env.observation_space
+        act_space = env.action_space
+        num_envs = env.num_envs
+
+        policy_hidden_dims, critic_hidden_dims = get_sac_hidden_dims(experiment_cfg)
+        action_range, action_bias = compute_action_scaling_direct(env, device)
+        policy = PhysicsBoundedActor(
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            action_range=action_range,
+            action_bias=action_bias,
+            hidden_dims=policy_hidden_dims,
+            initial_log_std=experiment_cfg["models"]["policy"].get("initial_log_std", -1.9),
+        )
+        critic_kwargs = dict(
+            observation_space=obs_space, action_space=act_space, device=device, hidden_dims=critic_hidden_dims,
+        )
+        critic_1 = SACCritic(**critic_kwargs)
+        critic_2 = SACCritic(**critic_kwargs)
+        target_critic_1 = SACCritic(**critic_kwargs)
+        target_critic_2 = SACCritic(**critic_kwargs)
+
+        # Inference only — no training, no transitions ever get recorded, so the replay buffer
+        # only needs to exist because CustomSAC/SAC's constructor requires one. memory_size=1
+        # avoids allocating the multi-GB buffer used during actual training for nothing.
+        agent_dict = {k: v for k, v in experiment_cfg["agent"].items()
+                      if k not in ("class", "rewards_shaper_scale")}
+        # Base SAC.act() samples a *random* action while timestep < cfg.random_timesteps (8000
+        # in skrl_sac_cfg.yaml) — correct for a fresh training run's initial exploration phase,
+        # but play.py's own timestep always restarts at 0, so without this override the first
+        # 8000 played steps would show random noise instead of the trained policy.
+        agent_dict["random_timesteps"] = 0
+
+        from skrl.resources.preprocessors.torch import RunningStandardScaler
+        agent_dict["observation_preprocessor"] = RunningStandardScaler
+        agent_dict["observation_preprocessor_kwargs"] = {"size": obs_space}
+        agent_dict["state_preprocessor"] = None
+        agent_dict["state_preprocessor_kwargs"] = {}
+
+        memory = NStepMemory(
+            memory_size=1, num_envs=num_envs, device=device,
+            n_steps=experiment_cfg.get("memory", {}).get("n_steps", 3),
+            discount_factor=agent_dict.get("discount_factor", 0.97),
+            replacement=True,
+        )
+
+        agent = CustomSAC(
+            models={
+                "policy": policy, "critic_1": critic_1, "critic_2": critic_2,
+                "target_critic_1": target_critic_1, "target_critic_2": target_critic_2,
+            },
+            memory=memory,
+            observation_space=obs_space,
+            action_space=act_space,
+            device=device,
+            cfg=agent_dict,
+        )
+        agent.init()
+
+        print(f"[INFO] Loading model checkpoint from: {resume_path}")
+        agent.load(resume_path)
+        agent.training = False
+
+    else:
+        # ------------------------------------------------------------------ #
+        #  All other algorithms (PPO, AMP, IPPO, MAPPO) — standard Runner     #
+        # ------------------------------------------------------------------ #
+        # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
+        runner = Runner(env, experiment_cfg)
+
+        print(f"[INFO] Loading model checkpoint from: {resume_path}")
+        runner.agent.load(resume_path)
+        # set agent to evaluation mode
+        # runner.agent.set_running_mode("eval")
+        runner.agent.training = False
+        agent = runner.agent
 
     # reset environment
     obs, _ = env.reset()
@@ -247,7 +353,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         with torch.inference_mode():
 
             # agent stepping
-            outputs = runner.agent.act(obs, None, timestep=timestep, timesteps=timestep)
+            outputs = agent.act(obs, None, timestep=timestep, timesteps=timestep)
             # - multi-agent (deterministic) actions
             if hasattr(env, "possible_agents"):
                 actions = {a: outputs[-1][a].get("mean_actions", outputs[0][a]) for a in env.possible_agents}

@@ -77,13 +77,44 @@ class NStepMemory(RandomMemory):
         self._ensure_extra_tensors()
 
         total_size = self.memory_size * self.num_envs
-        # Exclude the last (n_steps-1)*num_envs flat indices to guarantee n future steps exist
-        valid_size = max(1, len(self) - (self.n_steps - 1) * self.num_envs)
+
+        # Row-level validity mask: a row is usable as a *base* row only if (a) it has actually
+        # been written, and (b) walking forward (n_steps-1) rows from it does not cross the
+        # current write frontier (self.memory_index) into data from a different, unrelated lap
+        # of the ring buffer.
+        #
+        # The previous approach (`valid_size = len(self) - (n_steps-1)*num_envs`) only tracks
+        # this correctly before the buffer first wraps: once self.filled is True, len(self)
+        # freezes at full capacity and that "exclude the physically-last rows" window stops
+        # lining up with the real (moving) write frontier, silently letting N-step windows read
+        # stale data from an episode that was overwritten long ago — see
+        # source/phantomx_thesis/tests/test_skrl_sac_memory_wraparound.py for a reproduction.
+        # `offset` below is "how many rows before the newest write" a given row is (0 = newest);
+        # rows younger than n_steps-1 are exactly the ones whose forward window would cross the
+        # frontier, mirroring the old cutoff exactly for the pre-wrap case (filled=False) while
+        # also correctly handling the moving frontier once wrapped.
+        rows = torch.arange(self.memory_size, device=self.device)
+        written = (
+            torch.ones(self.memory_size, dtype=torch.bool, device=self.device)
+            if self.filled else rows < self.memory_index
+        )
+        offset = (self.memory_index - 1 - rows) % self.memory_size
+        row_valid = written & (offset >= self.n_steps - 1)
+
+        valid_rows = rows[row_valid]
+        if valid_rows.numel() == 0:
+            valid_rows = rows[:1]  # degenerate startup case, mirrors the old max(1, ...) guard
+
+        # Every env shares the same row-validity pattern (all envs are written together each
+        # add_samples() call), so expand row indices to flat (memory_size*num_envs) indices.
+        env_offsets = torch.arange(self.num_envs, device=self.device)
+        valid_flat = (valid_rows.unsqueeze(1) * self.num_envs + env_offsets).reshape(-1)
 
         if self._replacement:
-            base_indexes = torch.randint(0, valid_size, (batch_size,))
+            pick = torch.randint(0, valid_flat.numel(), (batch_size,))
         else:
-            base_indexes = torch.randperm(valid_size, dtype=torch.long)[:batch_size]
+            pick = torch.randperm(valid_flat.numel(), dtype=torch.long)[:batch_size]
+        base_indexes = valid_flat[pick]
 
         # ---- N-step return computation ----------------------------------------
         rewards_view = self.tensors_view["rewards"]        # (total, 1)
