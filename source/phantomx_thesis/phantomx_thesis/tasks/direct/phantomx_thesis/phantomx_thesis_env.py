@@ -413,7 +413,7 @@ class PhantomxThesisEnv(DirectRLEnv):
         BOOTSTRAP_SPEED = 0.15   # m/s — unverifiziert, ob physisch komfortabel erreichbar
                                 # (Aktuator velocity_limit=0.8 rad/s in phantomx.py); in
                                 # TensorBoard (track_lin_vel_xy_exp, Episodenlänge) beobachten
-        if steps < 300_000:
+        if steps < 200_000:
             self._commands[env_ids] = 0.0
             self._commands[env_ids, 0] = BOOTSTRAP_SPEED
         else:

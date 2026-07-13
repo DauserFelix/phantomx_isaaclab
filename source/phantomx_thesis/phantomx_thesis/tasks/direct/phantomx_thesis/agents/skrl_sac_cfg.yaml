@@ -97,7 +97,7 @@ agent:
 
 trainer:
   class: SequentialTrainer
-  timesteps: 1000000   # zurueckgesetzt von 200000 (war ein kurzer isolierter Diagnose-Testlauf
+  timesteps: 600000   # zurueckgesetzt von 200000 (war ein kurzer isolierter Diagnose-Testlauf
                         # aus einer frueheren Session, nie fuer den vollen Lauf zurueckgesetzt).
                         # Fuer einen erneuten kurzen Diagnoselauf hier bewusst temporaer senken.
   environment_info: log

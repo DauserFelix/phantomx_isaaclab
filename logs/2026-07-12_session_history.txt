@@ -467,24 +467,271 @@ Neu:
 
 
 --------------------------------------------------------------------------------
-16. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+16. AUFLÖSUNG PUNKT 14: JOINT_ACCEL/TORQUE-LADE-BUG GEFUNDEN UND GEFIXT
 --------------------------------------------------------------------------------
 
-1. AKTUELLSTER PUNKT (Punkt 14): Per-Term-min/mean-Debug-Print in _get_rewards() einbauen
-   (nur Diagnose, danach wieder entfernen) und damit verifizieren, welcher Reward-Term den
-   flachen inst_min≈-20 seit Step 10k erzeugt — Hauptverdächtiger femur_flip_penalty,
-   sekundär dof_acc_l2/dof_torques_l2. ERST danach Fix wählen (Optionen a-d in Punkt 14).
-2. Ungeklärt aus Punkt 14: ob/mit welchem reward_clamp_value der zuletzt vom User
-   analysierte Lauf tatsächlich gefahren wurde — der beobachtete N-Step-Return-min (-253)
-   ist mit dem in Punkt 11 gesetzten ±20-Clamp rechnerisch kaum vereinbar. Vor der nächsten
-   Diagnose klären, welcher Cfg-Stand für welchen Lauf aktiv war.
-3. femur_flip_penalty_scale=-5.0 und die Schwelle "0 rad = Umkipp-Punkt" sind weiterhin
-   unverifizierte Startwerte — nach einem Play/Video-Lauf mit sichtbarem Roboterverhalten
-   abgleichen und ggf. nachjustieren.
-4. play.py hat weiterhin keinen CustomSAC-Ladepfad (seit Log 07-09 offen, in Punkt 6 dieser
-   Session erneut bestätigt) — nötig für SAC-Checkpoints, die mit --algorithm SAC
-   trainiert wurden. Aktuell nur für --algorithm PPO verifiziert getestet.
-5. Kein Git-Commit dieser Session angelegt (wie schon in Log 07-11 empfohlen, weiterhin
-   offen) — würde künftige Rollbacks deutlich robuster machen.
+User lieferte den in Punkt 14 geforderten Per-Term-Debug-Output selbst (aus einem echten
+Lauf): dof_acc_l2 min=-32.657 mean=-1.973 — mit Abstand größter Ausreißer, femur_flip_l2 nur
+min=-0.115. Das widerlegt die in Punkt 14 übertragene "femur_flip_penalty ist Hauptverdächtiger"
+-These und bestätigt stattdessen wieder These D aus Punkt 10.
+
+Auftrag: User hatte joint_accel_reward_scale/joint_torque_reward_scale in der BASIS-Cfg auf 0.0
+gesetzt, der Debug-Output zeigte aber weiterhin volle dof_acc_l2-Werte — "warum wird die
+Änderung nicht übernommen".
+
+VERIFIZIERT (4-Schritte-Checkliste des Users durchgearbeitet):
+  1. PhantomxThesisSACEnvCfg (SAC-Subklasse) hatte einen EIGENEN, nicht angepassten Override
+     (joint_torque_reward_scale=-5e-6, joint_accel_reward_scale=-2.5e-5) — überschrieb die
+     Basis-Cfg-Änderung des Users stillschweigend für jeden SAC-Lauf. Exakt der vom User selbst
+     als "häufigster Verdacht" benannte Fall.
+  2. Kein Editable-Install-Schatten (RECORD der .dist-info enthält keine env_cfg.py-Kopie).
+  3. Kein Stale-Bytecode (.pyc jeweils neuer als .py).
+  4. Keine weitere Setzstelle (Optuna-Block auskommentiert, params/env.yaml ist reine
+     Log-Ausgabe, wird nie zurückgelesen).
+  Rechnerischer Beweis, dass Fund 1 die volle Erklärung ist: mit dem alten SAC-Wert
+  (-2.5e-5) ergibt joint_accel≈3,95 Mio. (mean) bzw. ≈65,3 Mio. (min) — beides plausibel für
+  einen ruckartig agierenden, früh trainierten Hexapod, kein weiteres Rätsel nötig.
+
+FIX: SAC-Subklasse überschreibt joint_torque_reward_scale/joint_accel_reward_scale nicht mehr
+separat — beide erben jetzt aus der Basisklasse (dort 0.0, User-Änderung greift jetzt für
+PPO UND SAC).
+
+
+--------------------------------------------------------------------------------
+17. FOLGE-DIAGNOSE: ENTROPY-KOEFFIZIENT-ANSTIEG 150K→260K — UNBEDENKLICH
+--------------------------------------------------------------------------------
+
+User beobachtete α steige seit 150k Schritten von (zunächst gemeldet) 0.04 auf 0.055. Analyse:
+plausible Erklärung wäre kurzes Nachschwingen durch den Curriculum-Phasenwechsel bei 100k
+(plötzlicher Schwierigkeitsabfall → Policy kurzzeitig zu deterministisch → Regler zieht α
+wieder hoch) — als Beobachtungspunkt markiert (weiter steigend = Warnsignal, Plateau = normal).
+User korrigierte die Werte im Anschluss: tatsächlich 0.004→0.0055, nicht 0.04→0.055 — liegt
+damit genau im schon früher (Punkt 10 dieser Session) als gesund bewerteten Plateau-Bereich
+(~0,005-0,007). Kein Handlungsbedarf, Korrektur nur zur Kenntnis genommen.
+
+
+--------------------------------------------------------------------------------
+18. TENSORBOARD-ANALYSE: LERNT DER ROBOTER NACH 300K NOCH? (Lauf 2026-07-12_13-06-39)
+--------------------------------------------------------------------------------
+
+User-Frage: falls das Gehen nach 300k Schritten noch nicht gelernt ist, hilft mehr Training?
+Datenzug aus dem damals laufenden Job (10k-310k): track_lin_vel_xy_exp, Episodenlänge und
+Entropy-Koeffizient zeigen alle drei GEMEINSAM einen Einbruch direkt nach dem Curriculum-
+Phasenwechsel (Tiefpunkt ~130k-170k: Episodenlänge 696→411, track_lin_vel 2,41→1,99), gefolgt
+von einer konsistenten Erholung ab ~170k — bei Step 310k liegt track_lin_vel_xy_exp (3,18)
+bereits ÜBER dem alten Bootstrap-Peak (2,41 bei 50k). Antwort: Trend ist aktiv und sich
+beschleunigend, kein Plateau — mehr Training lohnt sich voraussichtlich, kein Abbruchgrund.
+
+
+--------------------------------------------------------------------------------
+19. LIVE-BEOBACHTUNG: ROBOTER STEHT PRAKTISCH STILL — URSACHENANALYSE
+--------------------------------------------------------------------------------
+
+User hat der Simulation zugesehen: Roboter lernt zu stehen, bewegt sich aber kaum, kippt nach
+~30s leicht nach vorne um ("hat nichts mit Gehen zu tun"). Direkte Bestätigung der bereits
+mehrfach mathematisch hergeleiteten Schwäche: bei movement_speed_x=0.05 und
+lin_vel_kernel_width=0.1 gibt komplettes Stillstehen noch exp(-0.05²/0.1)≈0,975 — 97,5% des
+maximalen Tracking-Rewards fürs Nichtstun. track_lin_vel_xy_exp als Reward-Proxy hatte das
+verschleiert (weil er selbst bei Stillstand hoch bleibt), weshalb Punkt 18s Optimismus auf
+Basis dieser Metrik ENTKRÄFTET wird — die neue avg_forward_speed_mps-Metrik (aus vorheriger
+Session, siehe früherer Log-Eintrag) wäre hier das ehrlichere Signal gewesen, war im
+analysierten Lauf aber noch nicht aktiv.
+
+Frage "müssen wir mehr explorieren?": verneint — Entropy-Koeffizient sah nie kollabiert aus
+(Plateau ~0,005-0,007), das Problem ist ein zu schwacher REINFORCEMENT-Gradient (Stillstehen
+kaum schlechter belohnt als Laufen), keine fehlende Exploration. Empfehlung: Reward-Gradient
+verstärken, nicht Exploration erhöhen.
+
+
+--------------------------------------------------------------------------------
+20. SAC-CURRICULUM AUF ECHTEN ZWEI-PHASEN-WECHSEL UMGEBAUT (0,2 → 0,05 m/s)
+--------------------------------------------------------------------------------
+
+Diskussion: bisheriges SAC-Curriculum war bereits "fix hoch (0.05=max), dann Fenster das sich
+nach unten öffnet" — nicht "niedrig zuerst" wie PPO. Vorschlag geprüft: noch höheres
+Bootstrap-Tempo (deutlich über dem eigentlichen Ziel) sollte einen klareren Reward-Gradienten
+zwischen Stehen/Laufen erzwingen (gleiches exp-Kernel-Argument wie Punkt 19), ein echtes
+Gangmuster wird dann auf das niedrigere Zieltempo heruntertransferiert statt von Null unter
+schwachem Gradienten gelernt zu werden.
+
+UMGESETZT (_apply_velocity_curriculum, SAC-Zweig, phantomx_thesis_env.py): kompletter Umbau
+von "fix hoch → sich öffnendes Zufallsfenster" auf reinen Zwei-Phasen-Wechsel:
+  steps < 100_000:  commands[:,0] = BOOTSTRAP_SPEED (neue benannte Konstante, 0.2 m/s)
+  steps >= 100_000: commands[:,0] = movement_speed_x (0.05), + Yaw falls aktiv
+BOOTSTRAP_SPEED=0.2 ist unverifiziert (4x PPOs bisheriges Maximum) — im Code-Kommentar markiert,
+per track_lin_vel_xy_exp/Episodenlänge zu beobachten, ob es überhaupt erreichbar ist.
+
+
+--------------------------------------------------------------------------------
+21. NEUER REWARD GEGEN HEKTISCHE BEWEGUNG (joint_accel wiederbelebt, diesmal geklemmt)
+--------------------------------------------------------------------------------
+
+Auftrag: sinnvoller Reward/Zusatz gegen unnötig hektische Bewegungen, MUSS für PPO und SAC
+funktionieren. Analyse: action_rate_l2 existiert bereits (Scale -0.02, geteilt), aber
+joint_accel_reward_scale/joint_torque_reward_scale stehen seit dem Q-Divergenz-Fix (Punkt 11)
+auf 0.0 — kein Beschleunigungs-basiertes Smoothness-Signal mehr aktiv.
+
+UMGESETZT: joint_accel (dof_acc_l2) reaktiviert, aber diesmal mit Sicherheitsnetz — derselbe
+Clamp-vor-Skalierung-Trick wie bei clamp_reward, nur auf den Einzelterm angewendet:
+  - env.py: joint_accel = clamp(sum(joint_acc²), max=cfg.joint_accel_clamp) VOR der Skalierung.
+  - env_cfg.py (Basisklasse, gilt jetzt für PPO UND SAC gleich): joint_accel_reward_scale
+    zurück auf -2.5e-7 (Original-PPO-Wert aus dem auskommentierten Optuna-Block), neues Feld
+    joint_accel_clamp=5e7 (Startwert, grob aus den in Punkt 16 beobachteten dof_acc_l2-Werten
+    hergeleitet — typisch ~4 Mio., alte Ausreißer ~65 Mio.).
+  - Redundanter SAC-Override komplett entfernt (kein Wiederholen des Punkt-16-Bugmusters).
+  joint_torque_reward_scale bleibt bei 0.0 (Torque ist Effizienz-, nicht Ruckartigkeits-Maß,
+  außerhalb des Auftragsumfangs).
+
+
+--------------------------------------------------------------------------------
+22. TENSORBOARD-ANALYSE VOLLSTÄNDIGER LAUF (2026-07-12_16-12-44, 680k+ Schritte) — ERFOLG
+--------------------------------------------------------------------------------
+
+User bat um Einschätzung, ob sich Abwarten noch lohnt ("rewards extrem gut, critic loss
+konvergiert gegen 0, policy loss gegen -13"). Dieser Lauf enthält bereits alle Punkte 16-21
+(Ladebug-Fix, Zwei-Phasen-Curriculum, geklemmter joint_accel, movement_penalty_scale vom User
+selbst auf 25 verdoppelt, lin_vel_kernel_width vom User auf 0.005 verengt — siehe Punkt 24).
+
+BEFUND: avg_forward_speed_mps (neue Metrik, erstmals mit Daten) pendelt seit Step 360k in
+engem Band um 0,075-0,077 m/s — deutlich über Kommando (0,05), stabil, kein Rauschen mehr.
+Episodenlänge liegt seit ~160k praktisch durchgehend am Maximum (1970-1990/2000). foot_contact
+0,97-0,99. femur_flip_l2 und lazy_legs beide faktisch bei Null seit Step 110k — die
+Instabilitäts-Probleme aus früheren Läufen sind hier nicht mehr sichtbar. tripod_gait steigt
+noch leicht weiter (1,81→1,95), Critic-/Policy-Loss/Entropie konvergieren noch glatt weiter.
+
+EMPFEHLUNG: Verhaltens-Metriken sind seit ~300-400k Schritten eingeschwungen, Hauptgewinn
+eingefahren — Abbruch vertretbar (agent_600000.pt/best_agent.pt dürfte kaum schlechter sein
+als das Endergebnis), Weiterlaufen für den Feinschliff bei Gangqualität aber unschädlich.
+
+
+--------------------------------------------------------------------------------
+23. MECHANIK-ERKLÄRUNGEN (keine Code-Änderungen)
+--------------------------------------------------------------------------------
+
+- track_lin_vel_xy_exp / track_ang_vel_z_exp / movement_penalty im Detail erklärt (exakte
+  Formeln, Kernel-Breite, Vorzeichen-Asymmetrie von movement_penalty). WICHTIGE KORREKTUR
+  gegenüber einer früheren Aussage: da yaw_rotation_speed_x=0.0 für SAC, ist commands[:,2] nie
+  ungleich 0 — track_ang_vel_z_exp belohnt für SAC also "geradeaus laufen ohne Drift", nicht
+  "Kurve auf Befehl ausführen" (das gilt nur für PPO, dort yaw_rotation_speed_x=0.2).
+- femur_flip_penalty im Detail erklärt (relu(-femur_pos), Summe über 6 Beine, Schwelle 0 rad
+  weiterhin unverifiziert).
+- movement_penalty_scale=25.0 (positiv) erklärt: kein Bug — reine Stil-Inkonsistenz im File
+  (die meisten Penalty-Terme speichern die Scale negativ und multiplizieren direkt,
+  movement_penalty/lazy_legs speichern sie positiv und negieren explizit im Dict). Funktional
+  identisch, Angebot zur kosmetischen Vereinheitlichung ausgeschlagen/nicht verfolgt.
+- "Warum movement_penalty statt eines symmetrischen movement_reward?" erklärt: asymmetrisch
+  bewusst, um nicht zusätzlich Überschreiten zu belohnen (würde Tracking-Ziel untergraben,
+  Roboter würde einfach maximal schnell laufen wollen). Ergänzt den symmetrischen
+  track_lin_vel_xy_exp gezielt mit stärkerem Gegendruck speziell gegen Stillstand (Punkt 19).
+
+
+--------------------------------------------------------------------------------
+24. ROS2: export_policy.py — SAC-Unterstützung bestätigt + action_range/action_bias-Fix
+--------------------------------------------------------------------------------
+
+Frage: kann export_policy.py (ros2_ws) SAC-Checkpoints exportieren? Geprüft gegen die reale
+PhysicsBoundedActor/CustomSAC-Checkpoint-Struktur (Keys: policy/critic_1/critic_2/
+target_critic_1/target_critic_2/*_optimizer/observation_preprocessor) — ja, load_sac() passt
+strukturell exakt (net.0/net.2-Layer-Namen, mean_head, RunningStandardScaler-Keys).
+
+Zwei kleine, damals folgenlose Lücken gefunden und auf Bitte gefixt: SACActor las
+action_range nur aus einem CLI-Default (nicht aus dem im Checkpoint gespeicherten Buffer) und
+wendete action_bias gar nicht an (bei uns immer 0, daher bisher unschädlich). Fix: SACActor
+nimmt jetzt action_range/action_bias als Tensor-Buffer, load_sac() liest beide bevorzugt aus
+dem Checkpoint, CLI-Wert nur noch Fallback. Per synthetischem Checkpoint + torch.jit.script
+funktional smoke-getestet (Forward-Pass korrekt auf ±1,047 begrenzt, Scripting kompiliert,
+Fallback-Pfad funktioniert weiterhin).
+
+
+--------------------------------------------------------------------------------
+25. ROS2: phantomx_policy_simulation_interface.py Review + algorithmus-abhängiges Clamping
+--------------------------------------------------------------------------------
+
+Vollständiger Review des ROS2-Deployment-Knotens (Observation-Aufbau, Joint-Umsortierung,
+Default-Pose, Action-Pipeline) gegen phantomx_thesis_env.py. Größter Fund: Action-Clamping
+(±1.0 und ±0,5235 rad Joint-Limit) wurde UNCONDITIONAL für beide Algorithmen angewendet —
+passt exakt zu SAC (strict_action_pipeline=True im Training), aber NICHT zu PPO
+(strict_action_pipeline=False, komplett ungeklemmtes Training) — die PPO-Policy hätte auf
+echter Hardware ein Clamping erfahren, das sie beim Training nie sah.
+
+Sonst als korrekt verifiziert: Observation-Reihenfolge/-Größe (66 = 3+3+3+3+18+18+18), die
+POLICY_TO_MOTOR/MOTOR_TO_POLICY-Permutationslogik (von Hand durchgerechnet), Default-Pose-Werte
+(matchen isaaclab_assets/robots/phantomx.py), Gravity-Projektion via Quaternion-Rotationsmatrix.
+Nicht unabhängig verifizierbar: ob /odom wirklich Body-Frame-Twist liefert (Plugin-abhängig,
+nicht einsehbar); commands ist hardcodiert [0.07,0,0] unabhängig von der gewählten Policy.
+
+FIX (auf Bitte umgesetzt — Datei existierte vorher nicht im Workspace, wurde neu angelegt):
+neue Methode _effective_actions() klemmt nur noch wenn self.algorithm=="sac"; dasselbe Gate
+jetzt auch für das Joint-Limit-Clamp in policy_action_to_motor_commands(); last_actions wird
+jetzt aus derselben _effective_actions()-Berechnung gespeist statt aus einer zweiten,
+unabhängig hart geklemmten Stelle. main() übergibt jetzt algorithm=choice an den Node.
+
+
+--------------------------------------------------------------------------------
+26. OBSERVATION-VERGLEICH play.py vs. ROS2-Interface (Plan-Mode + Umsetzung)
+--------------------------------------------------------------------------------
+
+Idee des Users: play.py und die ROS2-Node sollen dieselbe Robotersituation durchlaufen, die
+daraus berechneten 66-dim Observation-Vektoren aufgezeichnet und direkt verglichen werden,
+um Diskrepanzen empirisch statt nur per Code-Review zu finden. Über Plan-Mode entwickelt.
+
+Recherche (Explore-Agent) zur ROS2-Testinfrastruktur ergab: keine bestehende Logging-/
+Vergleichs-Infrastruktur; fake_imu_data.py publiziert auf /imu/data (Topic-Mismatch zum
+Interface-Knoten, der /imu erwartet); fake_joint_state.py publiziert eine Nullstellung statt
+der echten Default-Pose; kein fake /odom; die Isaac-Sim-ROS2-Bridge existiert als USD-Asset
+(isaacsim_ros2_interface/*.usd) ist aber aktuell nicht die aktive USD in phantomx.py (auskommentiert).
+Direkt an isaaclab/utils/math.py verifiziert: IsaacLabs root_quat_w ist WXYZ-Konvention
+(quat_apply_inverse-Docstring), ROS' Imu.orientation ist XYZW — der zentrale Stolperstein für
+einen naiven Vergleich.
+
+ENTSCHIEDUNG: Offline/Open-Loop-Vergleich statt Live-ROS2 (last_actions ist Regelkreis-Zustand,
+bei Live-Vergleich würden zwei unabhängige Policies ab Step 2 auseinanderlaufen und nur noch
+Policy-Drift zeigen, nicht Observation-Korrektheit).
+
+UMGESETZT:
+  - play.py: neuer --record_trace/--record_length Flag (erzwingt --num_envs 1), zeichnet pro
+    Step rohe Ground-Truth-Größen (Gelenkstellung, Quaternion, Winkel-/Lineargeschwindigkeit,
+    Kommandos — fix auf [0.07,0,0] für Vergleichbarkeit, Aktionen) plus obs_noisy und eine
+    rauschfreie obs_clean-Rekonstruktion als .npz auf.
+  - Neues ros2_ws/.../compare_observations.py: lädt die .npz, füttert jeden Step durch die
+    ECHTEN joint_sensor_callback/imu_callback/odom_callback/sensor_to_policy_obs-Methoden aus
+    phantomx_policy_simulation_interface.py (auf einem SimpleNamespace-Stand-in, kein
+    rclpy.init()/keine echte Node nötig — Datei muss aber in einer rclpy-fähigen
+    Python-Umgebung laufen, da rclpy.node.Node auf Modulebene importiert wird), diffed
+    segmentweise gegen obs_clean.
+  - Korrektur während der Implementierung gegenüber dem approved Plan: Actions-Tail-Index ist
+    t (nicht t-1) — _pre_physics_step() überschreibt self._actions bereits VOR
+    _get_observations() im selben env.step()-Aufruf.
+  - Eigener Funktionstest (kein Live-Isaac-Sim/ROS2 hier verfügbar): Minimal-Stub für
+    rclpy/sensor_msgs/std_msgs/nav_msgs gebaut, synthetischer Trace mit UNABHÄNGIGER
+    Quaternion-Referenzimplementierung erzeugt. Ergebnis: korrekte Daten diffen auf
+    Maschinen-Null (3e-16); eine absichtlich vertauschte WXYZ/XYZW-Quaternion wird exakt und
+    ausschließlich im gravity_b-Segment erkannt (1,97), alle anderen Segmente bleiben bei 0 —
+    Test hat also echte Trennschärfe, keine Tautologie. Dabei einen echten Bug im NEUEN
+    Vergleichsskript gefunden und gefixt (nicht im Interface-Code): joint_sensor_callback prüft
+    `if msg.velocity:`, was bei einem NumPy-Array statt einer Python-Liste einen
+    ValueError wirft — position/velocity werden jetzt als list(...) übergeben.
+
+
+--------------------------------------------------------------------------------
+27. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. compare_observations.py auf echten Daten laufen lassen: play.py --record_trace auf der
+   Isaac-Sim-fähigen Maschine mit einem aktuellen SAC-Checkpoint aufzeichnen, dann
+   compare_observations.py in der ROS2-Workspace-Umgebung (mit rclpy) auswerten. Bisher nur
+   mit synthetischen Daten getestet (Punkt 26).
+2. BOOTSTRAP_SPEED=0.2 m/s (Punkt 20) ist unverifiziert, ob physisch komfortabel erreichbar —
+   nach genug Trainingszeit in der neuen Zwei-Phasen-Curriculum-Konfiguration prüfen.
+3. joint_accel_clamp=5e7 (Punkt 21) ist ein grober Startwert — beobachten, ob dof_acc_l2
+   ständig am Clamp klebt (dann zu niedrig) oder nie eingreift (dann irrelevant hoch).
+4. femur_flip_penalty_scale und die "0 rad"-Umkipp-Schwelle weiterhin unverifiziert (aus
+   Log-Punkt 12) — im aktuellen guten Lauf (Punkt 22) war femur_flip_l2 aber ohnehin ~0,
+   also aktuell nicht dringend.
+5. play.py hat weiterhin keinen CustomSAC-Ladepfad-Test mit echter Hardware/vollem ROS2-Stack
+   — nur play.py selbst (Isaac Lab, nicht ROS2) wurde für SAC bereits mehrfach erfolgreich
+   verifiziert (Log 07-12, frühere Einträge).
+6. Kein Git-Commit dieser gesamten Session (07-11 bis 07-12) angelegt — bei diesem Umfang an
+   Änderungen inzwischen dringlicher als in den früheren "offene Punkte"-Listen.
 
 ================================================================================

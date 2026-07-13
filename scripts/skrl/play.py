@@ -24,6 +24,20 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of the
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
+parser.add_argument(
+    "--record_trace",
+    type=str,
+    default=None,
+    help=(
+        "Path to save a per-step .npz trace (raw ground-truth robot state plus the noisy and "
+        "noise-free 66-dim observation) for offline comparison against the ROS2 deployment "
+        "pipeline (see ros2_ws/src/phantomx_package/src/compare_observations.py). Requires "
+        "--num_envs 1."
+    ),
+)
+parser.add_argument(
+    "--record_length", type=int, default=500, help="Number of steps to record when --record_trace is set."
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -79,6 +93,7 @@ import random
 import time
 
 import gymnasium as gym
+import numpy as np
 import skrl
 import torch
 from packaging import version
@@ -164,6 +179,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+
+    if args_cli.record_trace is not None and env_cfg.scene.num_envs != 1:
+        raise ValueError(
+            f"--record_trace requires --num_envs 1 for a clean 1:1 trace (got {env_cfg.scene.num_envs})."
+        )
 
     # configure the ML framework into the global skrl variable
     if args_cli.ml_framework.startswith("jax"):
@@ -345,6 +365,59 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # reset environment
     obs, _ = env.reset()
     timestep = 0
+
+    # --record_trace: dumps a per-step .npz for offline comparison against the ROS2 deployment
+    # pipeline (compare_observations.py). Fixes commands to [0.07, 0, 0] every step — matching
+    # phantomx_policy_simulation_interface.py's hardcoded self.commands — so the "commands"
+    # segment of the observation is directly comparable; forced every step (not just once) so
+    # an internal curriculum-driven reset mid-recording can't silently change it.
+    _trace = None
+    if args_cli.record_trace is not None:
+        if hasattr(env, "possible_agents"):
+            raise NotImplementedError("--record_trace only supports single-agent envs.")
+        env.unwrapped._commands[:, 0] = 0.07
+        env.unwrapped._commands[:, 1] = 0.0
+        env.unwrapped._commands[:, 2] = 0.0
+        _trace = {
+            key: [] for key in [
+                "joint_pos", "joint_vel", "root_ang_vel_b", "root_quat_w",
+                "projected_gravity_b", "root_lin_vel_b", "commands", "actions",
+                "obs_noisy", "obs_clean",
+            ]
+        }
+
+    def _record_step(applied_actions: torch.Tensor, obs_noisy: torch.Tensor) -> None:
+        """Snapshot raw ground-truth robot state (env 0) plus the noisy/clean 66-dim
+        observation. Called right after env.step() so the state matches what produced
+        obs_noisy. obs_clean mirrors _get_observations()'s formula but without the synthetic
+        sensor-noise terms, since a replayed/real sensor won't reproduce IsaacLab's specific
+        noise draws — see ros2_ws/src/phantomx_package/src/compare_observations.py."""
+        env_u = env.unwrapped
+        robot = env_u._robot
+        jpos_rel = robot.data.joint_pos - robot.data.default_joint_pos
+        obs_clean = torch.cat(
+            [
+                robot.data.root_lin_vel_b,
+                robot.data.root_ang_vel_b,
+                robot.data.projected_gravity_b,
+                env_u._commands,
+                jpos_rel,
+                robot.data.joint_vel,
+                env_u._actions,
+            ],
+            dim=-1,
+        )
+        _trace["joint_pos"].append(robot.data.joint_pos[0].cpu().numpy())
+        _trace["joint_vel"].append(robot.data.joint_vel[0].cpu().numpy())
+        _trace["root_ang_vel_b"].append(robot.data.root_ang_vel_b[0].cpu().numpy())
+        _trace["root_quat_w"].append(robot.data.root_quat_w[0].cpu().numpy())
+        _trace["projected_gravity_b"].append(robot.data.projected_gravity_b[0].cpu().numpy())
+        _trace["root_lin_vel_b"].append(robot.data.root_lin_vel_b[0].cpu().numpy())
+        _trace["commands"].append(env_u._commands[0].cpu().numpy())
+        _trace["actions"].append(applied_actions[0].cpu().numpy())
+        _trace["obs_noisy"].append(obs_noisy[0].cpu().numpy())
+        _trace["obs_clean"].append(obs_clean[0].cpu().numpy())
+
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -362,8 +435,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
                 actions = outputs[-1].get("mean_actions", outputs[0])
             # env stepping
             obs, _, _, _, _ = env.step(actions)
+
+            if _trace is not None:
+                env.unwrapped._commands[:, 0] = 0.07
+                env.unwrapped._commands[:, 1] = 0.0
+                env.unwrapped._commands[:, 2] = 0.0
+                _record_step(actions, obs)
+
         timestep += 1
         if args_cli.video and timestep == args_cli.video_length:
+            break
+        if _trace is not None and len(_trace["obs_clean"]) >= args_cli.record_length:
+            np.savez(
+                args_cli.record_trace,
+                step=np.arange(len(_trace["obs_clean"])),
+                **{k: np.stack(v) for k, v in _trace.items()},
+            )
+            print(f"[INFO] Trace mit {len(_trace['obs_clean'])} Steps gespeichert: {args_cli.record_trace}")
             break
 
         # time delay for real-time evaluation
