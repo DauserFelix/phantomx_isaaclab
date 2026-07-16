@@ -29,7 +29,7 @@ def run_training(trial_params: dict, trial_number: int) -> float:
         [
             "/workspace/isaaclab/isaaclab.sh", "-p",
             "scripts/skrl/train_optuna.py",
-            "--task", "Template-Phantomx-Thesis-Direct-v0",
+            "--task", "Template-Phantomx-Thesis-PPO-Direct_uneven-v0",
             "--headless",
             "--num_envs", "64",       # weniger Envs für schnellere Trials
         ],

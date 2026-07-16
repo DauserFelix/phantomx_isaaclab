@@ -247,13 +247,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if algorithm == "sac" and not is_sac_env_cfg:
         raise ValueError(
             f"--algorithm SAC requires the SAC task variant (env_cfg must be PhantomxThesisSACEnvCfg, "
-            f"got {type(env_cfg).__name__}). Use --task Template-Phantomx-Thesis-SAC-Direct-v0."
+            f"got {type(env_cfg).__name__}). Use --task Template-Phantomx-Thesis-SAC-Direct_uneven-v0."
         )
     if algorithm != "sac" and is_sac_env_cfg:
         raise ValueError(
             f"--algorithm {args_cli.algorithm} was requested against the SAC task variant "
             f"({type(env_cfg).__name__}), which uses SAC-specific reward/curriculum tuning. "
-            f"Use --task Template-Phantomx-Thesis-Direct-v0 for {args_cli.algorithm}."
+            f"Use --task Template-Phantomx-Thesis-PPO-Direct_uneven-v0 for {args_cli.algorithm}."
         )
 
     # create isaac environment

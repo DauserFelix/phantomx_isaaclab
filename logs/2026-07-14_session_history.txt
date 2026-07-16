@@ -1,0 +1,292 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-14
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-12_session_history.txt — dazwischen liegt eine LÜCKE
+(13.07.–14.07. vormittags): mehrere Commits + uncommitted Weiterentwicklung, die in
+keinem Log dokumentiert sind (siehe Punkt 1).
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. CODE-REWIND — WAS SICH ZWISCHEN LOG 07-12 UND HEUTE UNDOKUMENTIERT VERÄNDERT HAT
+--------------------------------------------------------------------------------
+
+Beim Wiedereinstieg (User bat um vollständige Analyse der logs/ + aktuellen Code)
+festgestellt: der Working Tree ist bereits deutlich weiter als der Stand aus Log
+2026-07-12 (Punkt 27 dort). Vier neue Commits seit be861a3 sind dazugekommen,
+PLUS uncommitted Änderungen an env.py/env_cfg.py von heute:
+
+  3554da6  merged running ppo config with current sac config.
+           PPO-standard_deviation runs against 0.7!
+  26cef34  policy trainiert mit PPO, noch nicht gut da schlechter reward dabei
+           aber trotzdem brauchbare modelle. Jetzt SAC trainieren
+  34ae70d  env.py und env_cfg.py so configuriert, dass PPO gut läuft und das
+           SAC training auch gut funktioniert!
+  124f938  Erstes SAC-Modell das perfekt auf ebenen Flächen geht
+  f0aafae  SAC Parameter gut, model passt. Aktuelle config für SAC ist für PPO
+           training nicht ganz so gut, movement Penalty zu hart (Vermutung)
+
+KONKRETE ÄNDERUNGEN gegenüber Log 07-12 (per Diff/Read verifiziert, nicht nur
+Commit-Messages geglaubt):
+  - Terrain: von reiner "plane" auf generiertes ROUGH_TERRAINS_CFG umgestellt
+    (5 Sub-Terrain-Typen: flat/random_rough/discrete_obstacles/pyramid_slope/
+    pyramid_stairs, je 20%, mit Difficulty-Curriculum). NEUE Flat-Varianten
+    PhantomxThesisFlatEnvCfg / PhantomxThesisSACFlatEnvCfg ergänzt, damit weiterhin
+    auf reinem Plane trainiert werden kann, ohne die Rough-Terrain-Basisklasse
+    anzufassen.
+  - action_scale: 0.5 → 0.75 rad (größere mögliche Gelenkauslenkung pro Aktion).
+  - joint_pos_limit: 0.5235 → 1.0 rad — bewusst proportional mitgezogen
+    (0.75/1.0 dieselbe relative Marge wie vorher 0.5/0.7854), damit das Clamp in
+    _pre_physics_step weiterhin nur als Sicherheitsnetz wirkt.
+  - strict_action_pipeline: jetzt True auch für PPO in der Basisklasse (vorher nur
+    SAC-Override) — PPO wird jetzt ebenfalls auf [-1,1] und q_def±joint_pos_limit
+    geklemmt, schließt eine dokumentierte Sim-to-Real-Lücke (ROS2-Deployment klemmt
+    schon länger, PPO trainierte bisher ungeklemmt).
+  - femur_flip_penalty (aus Log 07-12 Punkt 12) wieder VOLLSTÄNDIG entfernt — nur
+    noch ein Kommentar-Rest ("femur dragging") erinnert daran. Kein Reward-Term,
+    kein Feld, kein _episode_sums-Key mehr im Code.
+  - SAC-Curriculum (_apply_velocity_curriculum, SAC-Zweig): BOOTSTRAP_SPEED von
+    0.2 (Log 07-12 Punkt 20) auf 0.15 m/s gesenkt, Phasenwechsel-Schwelle von
+    100k auf 200k Schritte verschoben.
+  - PPO-Curriculum: dritte Stufe jetzt bei 350k (max_speed voll + Yaw), mittlere
+    Stufe bei max_speed/1.5 statt der alten /2-Teilung.
+  - movement_speed_x: 0.07 (Log 07-12) → 0.075 m/s (aktueller Stand, beide
+    Basis- und SAC-Cfg).
+  - joint_torque_reward_scale: jetzt 0.0 in der Basis-Cfg (war -5e-6), auskommentiert
+    im Code als "#-2e-5" — Torque-Penalty faktisch deaktiviert.
+  - Sensorrauschen NEU in _get_observations(): lin_vel/ang_vel/gravity/jpos_rel/jvel
+    bekommen jetzt jeweils torch.randn-Rauschen (Encoder-/IMU-Noise-Simulation für
+    Sim-to-Real), vorher waren das rohe, unverrauschte Werte.
+  - Periodischer Joint-State-Dump (alle 50k Schritte) in Terminal + joint_states.txt
+    im Run-Log-Ordner neu ergänzt, zum manuellen Abgreifen der aktuellen Pose.
+  - Per-Term-Reward-Debug-Print (alle 100 Schritte, min/mean je Reward-Dict-Key)
+    fest im Code (aus Log 07-12 Punkt 14 hervorgegangen, dort noch als "temporär,
+    danach zu entfernen" markiert — ist jetzt dauerhaft aktiv).
+
+STATUS: keine dieser Änderungen wurde in einem Log dokumentiert (Lücke 13.07.).
+Es gibt keine Diskrepanz zu den Commit-Messages selbst, nur zur bisherigen
+Log-Historie. Für künftige Sessions: Log-Pflicht nach JEDER Session, auch kurzen,
+sonst reißt die Kette wie hier.
+
+
+--------------------------------------------------------------------------------
+2. GESAMTE 4 LOGS (07-01, 07-09, 07-11, 07-12) DURCHGEARBEITET — VOLLSTÄNDIGE
+   STANDORTBESTIMMUNG FÜR DEN USER
+--------------------------------------------------------------------------------
+
+Auftrag: alle Session-Logs ausführlich studieren + aktuellen Action Space,
+Clipping und Joint-Limits im Code verifizieren (nicht nur den Logs vertrauen).
+
+ERGEBNIS (Kurzfassung, Details siehe Punkt 1 oben für das Delta):
+  - Action Space: 18 (6 Beine × 3 Gelenke: Coxa/Femur/Tibia), alphabetisch
+    geordnet wie in allen bisherigen Logs.
+  - Observation Space: 66 = lin_vel_b(3)+ang_vel_b(3)+gravity_b(3)+commands(3)+
+    joint_pos_rel(18)+joint_vel(18)+last_actions(18), jetzt MIT Sensorrauschen
+    (neu seit Log 07-12, siehe Punkt 1).
+  - Clipping (_pre_physics_step): über cfg.strict_action_pipeline gesteuert,
+    JETZT für PPO UND SAC True (Basisklasse) — Kette: actions→clamp(-1,1)→
+    q_def + action_scale(0.75)×actions→clamp(q_def±joint_pos_limit(1.0 rad)).
+  - Aktuator-Limits (phantomx.py, aktiv im Training): effort_limit=1.5 Nm,
+    velocity_limit=0.8 rad/s, Kp=10.0, Kd=2.0, soft_joint_pos_limit_factor=0.9.
+    Hardware-URDF-Limits (inaktiv im Training): ±2.618 rad, 2.8 Nm, 5.655 rad/s.
+  - Termination: Höhe <0.07 oder >0.30, Tilt gx²+gy²>0.04 (~18°), oder
+    Body/Coxa/Femur-Bodenkontakt (non_foot_contact).
+
+Dem User mitgeteilt: Code ist bereits weiter als Log 07-12 zeigt (siehe Punkt 1
+oben, damals noch nicht bekannt) — u.a. Rough-Terrain, action_scale/
+joint_pos_limit-Erhöhung, femur_flip_penalty wieder entfernt, SAC-Bootstrap-
+Speed/Curriculum-Schwelle angepasst.
+
+
+--------------------------------------------------------------------------------
+3. "WARUM LANDET PPO BEI ~0.11 M/S STATT DEN GEWÜNSCHTEN 0.075 M/S?" —
+   OVERSHOOT-URSACHE GEFUNDEN UND GEFIXT
+--------------------------------------------------------------------------------
+
+User-Frage zunächst mit "0.75 m/s" formuliert — per git log -p verifiziert: DIESER
+Wert kam in der GESAMTEN Projekthistorie nie als movement_speed_x vor (immer
+0.05-0.10 m/s). 0.75 ist stattdessen action_scale (max. Gelenkauslenkung in rad),
+eine andere Größe — vermutlich Verwechslung. User korrigierte die Frage im
+Folgenden selbst auf "0.075 m/s" (Tippfehler in der Erstfrage), die eigentliche
+Frage war also: Ist-Geschwindigkeit ~0.11 m/s liegt ÜBER dem Soll von 0.075 m/s
+(Overshoot), nicht darunter.
+
+URSACHENANALYSE (_compute_movement_penalty, binärer Zweig, aktiv für PPO da
+continuous_movement_penalty=False dort):
+  VORHER:
+    is_moving_forward = forward_speed > command_speed
+    deficit_penalty = (~is_moving_forward).float()          # 1.0 falls v<=c, sonst 0
+    overshoot_penalty = clamp(forward_speed - command_speed, min=0.0)  # proportional
+    return deficit_penalty + overshoot_penalty
+
+  Rechnerisch nachgewiesen (Kernel-Breite lin_vel_kernel_width=0.25 für PPO,
+  lin_vel_reward_scale=10.0, movement_penalty_scale=15.0, step_dt=0.02):
+    v=0.070 (knapp drunter):  track=0.1999  move_pen=-0.3000   total=-0.10
+    v=0.075 (exakt Ziel):     track=0.2000  move_pen=-0.3000   total=-0.10  (v<=c zählt noch als Deficit!)
+    v=0.076 (knapp drüber):   track=0.1999  move_pen=-0.0003   total=+0.1996
+    v=0.110 (beobachtet):     track=0.1904  move_pen=-0.0105   total=+0.1799
+  → Reward-Klippe GENAU am Ziel: Unterschreiten kostet immer die volle Strafe
+  (0.3/step), leichtes Überschreiten kostet fast nichts (Kernel mit Breite 0.25
+  ist bei wenigen cm/s Fehler praktisch blind). Erwartungswert bei verrauschter
+  PPO-Policy (Gaussian-Aktionen um einen Mittelwert) ist strikt dafür, den
+  Mittelwert ÜBER das Kommando zu legen — erklärt den beobachteten Offset von
+  ~+40-50% über dem Zielwert quantitativ.
+
+VERIFIZIERT gegen SAC (dort funktioniert es): SAC nutzt NICHT dieselbe binäre
+Formel, sondern den anderen Zweig (continuous_movement_penalty=True):
+    velocity_deficit = clamp(command_speed - forward_speed, min=0.0)  # nur Unterschreiten
+Für sich genommen wäre das ebenfalls asymmetrisch (Überschreiten kostet hier 0),
+ABER SAC hat zusätzlich lin_vel_kernel_width=0.005 (statt 0.25 bei PPO) — bei so
+engem Kernel fällt der Tracking-Reward selbst schon bei wenigen cm/s Abweichung
+drastisch ab (exp(-error²/0.005) statt exp(-error²/0.25)), macht also den
+Tracking-Term selbst zum impliziten Bremser gegen Overshoot. SAC braucht die
+Symmetrie im Penalty-Term nicht, weil der Kernel sie strukturell schon liefert.
+PPOs breiter Kernel (0.25) macht das NICHT, weshalb dort der stark asymmetrische
+Penalty-Term der einzige Faktor mit echtem Einfluss war — und der zog konsistent
+nach oben.
+
+FIX (nach kurzer Sackgasse — erster Versuch "binär symmetrisch" (1.0 bei v!=c,
+sonst 0) hätte KEINEN Trainings-Gradienten mehr geliefert, da for float-Werte
+v==c praktisch nie exakt zutrifft → wäre konstant ~1.0 gewesen, schlechter als
+vorher. Per AskUserQuestion die Variante klären lassen, User wählte die
+empfohlene Option):
+  phantomx_thesis_env.py, _compute_movement_penalty(), binärer Zweig:
+    return torch.abs(forward_speed - command_speed)
+  Symmetrisch proportional in beide Richtungen — v==c ist jetzt das eindeutige
+  Minimum ohne harten Sprung, kein bevorzugtes Überschreiten mehr.
+
+VERIFIKATION (py_compile via /isaac-sim/kit/python/bin/python3.11 fehlerfrei;
+kombinierten Reward-Verlauf von Hand nachgerechnet — /isaac-sim/kit/python/bin/
+python3.11, KEIN normales python3 in dieser Sandbox verfügbar):
+  v=0.050  total=0.1920   v=0.100  total=0.1920   (symmetrisch, identisch!)
+  v=0.060  total=0.1953   v=0.090  total=0.1953   (symmetrisch, identisch!)
+  v=0.075  total=0.2000   (alleiniges Maximum)
+Bestätigt: kombinierter Reward ist jetzt exakt symmetrisch um v=0.075, einziges
+sauberes Maximum am Kommando selbst.
+
+NÄCHSTER SCHRITT (noch nicht durchgeführt): neuer Trainingslauf nötig, um zu
+verifizieren, dass avg_forward_speed_mps jetzt tatsächlich näher an 0.075 statt
+bei 0.11 einpendelt — Reward-Landschaftsänderung allein beweist nur das neue
+Optimum, nicht ob PPO es innerhalb der Trainingszeit auch trifft. Nur den
+binären (PPO-)Zweig betroffen, SACs continuous-Zweig unverändert.
+
+
+--------------------------------------------------------------------------------
+4. LAUF 2026-07-14_14-42-29_ppo_torch ANALYSIERT — STANDARDABWEICHUNGS-EXPLOSION
+   BESTÄTIGT (3. UNABHÄNGIGER BELEG NACH LOG 07-09)
+--------------------------------------------------------------------------------
+
+User-Frage: warum geht die Standardabweichung ab ~100k Schritten extrem hoch und
+bleibt dann bei 7 hängen — sei bei früheren Trainings nicht passiert.
+
+VERIFIZIERT gegen echte TensorBoard-Daten (event_accumulator, /isaac-sim/
+python.sh — dieser Wrapper hat numpy, /isaac-sim/kit/python/bin/python3.11 allein
+NICHT):
+  Step     std       entropy_loss   lr          reward_mean  track_lin_vel
+     0    0.1394        0.0994    0.000039        40.164        0.4221
+ 72000    0.3112       -0.0356    0.000054       315.814        3.1724
+ 96000    0.6010       -0.1494    0.000086       436.395        4.1852
+100000    0.7430       -0.1863    0.000087       450.323        4.3140   <- Curriculum-Wechsel
+108000    0.9363       -0.2267    0.000088       453.189        4.5794
+120000    1.5367       -0.3146    0.000113       381.791        3.9565
+126000    2.1348          -      0.000141           -              -
+132000    3.1518          -      0.000173           -              -
+138000    4.7558          -      0.000174           -              -
+144000    6.0186          -      0.000183           -              -
+150000    6.7904       -0.5952    0.000200        453.859        4.5937
+180000+   7.3891 (=e^2, DECKEL)  -0.6154   ~0.00013-0.0002   bleibt dort bis Lauf-Ende (306k)
+
+BEFUND: σ steigt von Anfang an monoton (nicht "plötzlich bei 100k"), beschleunigt
+sich aber sichtbar GENAU an der Stelle, wo _apply_velocity_curriculum (PPO-Zweig)
+bei Step 100.000 von Kommando 0 auf ein reales Bewegungskommando (0.075/1.5≈0.05
+m/s) umschaltet — plausibler Auslöser der Beschleunigung, nicht der Ursache selbst
+(σ wächst nachweislich schon vorher langsam). Zwischen 108k und 150k verdoppelt
+sich σ mehrfach in kurzer Folge (exponentielles Wachstum), bis der harte Deckel
+max_log_std=2.0 (=> σ_max=exp(2.0)=7.389) in skrl_ppo_cfg.yaml erreicht wird —
+danach exakt konstant bei 7.3891, keine Bewegung mehr für die restlichen ~150k
+Schritte des Laufs.
+
+MECHANISMUS (identisch zur Analyse in Log 2026-07-09 Punkt 1, hier zum 3. Mal an
+einem neuen, unabhängigen Lauf bestätigt):
+  1. skrl-PPO-Entropiebonus (entropy_loss_scale=0.01) erzeugt aktiven Gradienten
+     Richtung höherer σ (Entropie einer Gaussian steigt monoton mit σ).
+  2. clip_actions: False in der YAML — Policy-Verteilung selbst bleibt ungeclippt,
+     skrl berechnet log_prob/Entropie auf der UNGECLIPPTEN Normal, obwohl die Env
+     (strict_action_pipeline) die tatsächliche Wirkung längst auf [-1,1] klemmt.
+     Bei σ>~2 landet fast jede gesampelte Aktion ohnehin am Rand — reines Rauschen,
+     das der Trainer aber weiterhin als nützliche Exploration bewertet.
+  3. Wachsendes σ -> wachsende KL-Divergenz zwischen Updates -> KLAdaptiveLR
+     reagiert hier mit STEIGENDER Learning Rate (0.000054 bei 72k -> 0.0002 bei
+     150k, siehe Tabelle) statt sie zu senken — verstärkt den Feedback-Loop
+     zusätzlich, statt ihn zu bremsen.
+  4. Ungebremst bis zum harten Deckel, dort für immer hängen — Entropiebonus
+     drückt am Deckel weiter in dieselbe Richtung, nur eben geclippt, kein
+     Absinken mehr möglich.
+
+EINORDNUNG "bei früheren Trainings nicht passiert": widerspricht der Befundlage
+aus Log 07-09 (dort zeigten ALLE 4 analysierten historischen PPO-Runs exakt
+dasselbe Muster: Deckel erreicht, dort für den Rest des Laufs hängengeblieben).
+Mögliche Erklärungen NICHT abschließend verifiziert (kein direkter Vergleichslauf
+gezogen): frühere Läufe evtl. nicht lange genug gelaufen um den Deckel zu
+erreichen, oder Reward-Scale-Änderungen seit damals (movement_penalty_scale
+mehrfach verändert, action_scale 0.5->0.75, siehe Punkt 1) haben die KL-Dynamik
+verschoben. Als offener Punkt markiert, nicht mit einem konkreten alten Lauf
+gegengerechnet.
+
+FIX EMPFOHLEN, NICHT UMGESETZT (identisch zu Log 07-09, User hat Umsetzung noch
+nicht bestätigt):
+  skrl_ppo_cfg.yaml:
+    max_log_std: 2.0 -> z.B. 0.0 (σ ≤ 1.0) — härtet die Obergrenze deutlich.
+    entropy_loss_scale: 0.01 -> 0.0-0.003 testen.
+    clip_actions: True setzen (Konsistenz mit dem Env-seitigen Clamp).
+    kl_threshold danach ggf. wieder lockern.
+
+STATUS: Fix vorgeschlagen, User-Bestätigung für Umsetzung + Testlauf steht noch
+aus — nächster Schritt für kommende Session.
+
+
+--------------------------------------------------------------------------------
+5. GEÄNDERTE DATEIEN DIESER SESSION
+--------------------------------------------------------------------------------
+
+Geändert:
+  source/.../phantomx_thesis_env.py
+    -> _compute_movement_penalty(): binärer Zweig von asymmetrisch
+       (deficit binär + overshoot proportional) auf torch.abs(forward_speed -
+       command_speed) symmetrisch umgestellt (Punkt 3). Kein anderer Teil der
+       Datei in dieser Session verändert — Punkt 1 dokumentiert Fremdänderungen
+       VOR dieser Session, nicht von hier.
+
+Neu:
+  logs/2026-07-14_session_history.txt (dieser Log)
+
+NICHT geändert (nur analysiert/empfohlen):
+  skrl_ppo_cfg.yaml — max_log_std/entropy_loss_scale/clip_actions/kl_threshold
+  weiterhin unverändert (Punkt 4), Umsetzung nächste Session.
+
+
+--------------------------------------------------------------------------------
+6. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. PPO-Entropie-Fix (Punkt 4) umsetzen: max_log_std, initial_log_std,
+   entropy_loss_scale, clip_actions, kl_threshold in skrl_ppo_cfg.yaml anpassen,
+   danach kurzen Testlauf fahren und Policy/Standard deviation beobachten (darf
+   NICHT mehr exakt am Deckel festfrieren).
+2. Movement-Penalty-Symmetrie-Fix (Punkt 3) durch echten Trainingslauf
+   verifizieren: avg_forward_speed_mps sollte jetzt näher an 0.075 statt bei
+   0.11 einpendeln.
+3. Ursache für "früheren Trainings ist das nicht passiert" (Punkt 4, Einordnung)
+   nicht abschließend geklärt — bei Gelegenheit einen alten "guten" Lauf explizit
+   gegen den aktuellen Stand (action_scale, movement_penalty_scale, Kernel-Breite)
+   gegenrechnen, statt nur zu vermuten.
+4. Log-Lücke (Punkt 1) — Empfehlung an den User: Log-Historie nach jeder Session
+   fortschreiben, auch bei kurzen/informellen Sessions, um erneutes
+   Rekonstruieren aus git log zu vermeiden.
+5. f0aafae-Commit-Message ("movement Penalty zu hart, Vermutung") deckt sich
+   inhaltlich mit dem in Punkt 3 gefundenen und gefixten Overshoot-Bug — nicht
+   explizit gegengeprüft, ob das dieselbe Beobachtung war, die zu diesem Commit
+   führte. Bei Gelegenheit verifizieren.
+
+================================================================================

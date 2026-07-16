@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 import gymnasium as gym
 
@@ -38,12 +40,15 @@ class PhantomxThesisEnv(DirectRLEnv):
             "tibia_rf", "tibia_rm", "tibia_rr"   # Right feet
         ])
 
+        # All bodies EXCEPT the last link (tibia/foot) — used to terminate the episode if any of
+        # these touch the ground (body, coxa, or femur dragging/collapsing is never a valid stance,
+        # unlike a tibia foot touching down).
+        self._non_foot_body_ids, _ = self._contact_sensor.find_bodies([
+            "MP_BODY", "base_link", "c1_.*", "c2_.*", "thigh_.*"
+        ])
+
         # MP_BODY index for height measurement (physical body, 10cm above base_link)
         self._mp_body_idx, _ = self._robot.find_bodies(["MP_BODY"])
-
-        # Femur (j_thigh_*) joint indices — default pose has all 6 at +0.5 rad (see
-        # isaaclab_assets/robots/phantomx.py). Used by the femur-flip penalty below.
-        self._femur_joint_ids, _ = self._robot.find_joints(["j_thigh_.*"])
 
         # Tripod gait indices into the 6-element foot array (order: lf=0, lm=1, lr=2, rf=3, rm=4, rr=5)
         self._TRIPOD_A = [0, 4, 2]  # lf, rm, lr
@@ -55,6 +60,11 @@ class PhantomxThesisEnv(DirectRLEnv):
         # separate from _episode_sums, since it's a raw m/s measurement, not a reward term, and
         # must be averaged over the actual number of steps taken, not the nominal episode length.
         self._episode_speed_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
+        # Same pattern as _episode_speed_sum, for the true (non-reward) average MP_BODY height —
+        # height_reward only shows how close the height is to the target via an exp-kernel, not
+        # the raw height itself, so this gives a directly readable value in TensorBoard.
+        self._episode_height_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # Logging
         self._episode_sums = {
@@ -74,7 +84,6 @@ class PhantomxThesisEnv(DirectRLEnv):
                 "foot_contact",
                 "tripod_gait",
                 "lazy_legs",
-                "femur_flip_l2",
             ]
         }
 
@@ -143,6 +152,29 @@ class PhantomxThesisEnv(DirectRLEnv):
             dim=-1,
         )  # total: 66
 
+        # Periodischer Joint-State-Dump von env 0 fuers Terminal (zum manuellen Abgreifen und
+        # z.B. per Hand in ROS spielen, um die aktuelle Pose zu ueberpruefen). Rohe, unverrauschte
+        # joint_pos (nicht das obs-jpos_rel), da das die tatsaechliche physikalische Pose ist.
+        # Zusaetzlich in eine joint_states.txt im Run-Log-Ordner geschrieben (self.cfg.log_dir,
+        # von train.py gesetzt), damit der Verlauf nach Trainingsende nicht nur im Terminal-
+        # Scrollback, sondern dauerhaft bei den restlichen Run-Artefakten dokumentiert ist.
+        if self.common_step_counter % 50_000 == 0:
+            joint_pos_env0 = self._robot.data.joint_pos[0].tolist()
+            lin_vel_env0 = self._robot.data.root_lin_vel_b[0].tolist()
+            ang_vel_env0 = self._robot.data.root_ang_vel_b[0].tolist()
+            mean_base_height = torch.mean(
+                self._robot.data.body_pos_w[:, self._mp_body_idx[0], 2] - self._terrain.env_origins[:, 2]
+            ).item()
+            line = (f"[JOINT_STATE step={self.common_step_counter}] "
+                    f"names={self._robot.joint_names} pos={joint_pos_env0} "
+                    f"lin_vel_b={lin_vel_env0} ang_vel_b={ang_vel_env0} "
+                    f"mean_base_height={mean_base_height:.4f}")
+            print(line)
+            log_dir = getattr(self.cfg, "log_dir", None)
+            if log_dir:
+                with open(os.path.join(log_dir, "joint_states.txt"), "a") as f:
+                    f.write(line + "\n")
+
         return {"policy": obs}
 
     # --------------------- REWARDS ---------------------
@@ -200,10 +232,15 @@ class PhantomxThesisEnv(DirectRLEnv):
         height_error = torch.square(base_height - self.cfg.target_base_height)
         height_reward = torch.exp(-height_error / 0.02)
 
+        # Raw height accumulation for the true average-body-height metric (nicht Teil des
+        # Rewards) — height_reward zeigt nur die Kernel-Nähe zum Ziel, nicht die Rohhöhe selbst.
+        self._episode_height_sum += base_height
+
         # Alive reward
         alive_reward = torch.ones_like(lin_vel_error)
 
         # Movement penalty: penalizes not moving forward (unconditional — wie Working-Model 21.04.)
+        # sowie (PPO) proportional zu schnelles Laufen — siehe _compute_movement_penalty.
         forward_speed = self._robot.data.root_lin_vel_b[:, 0]
         movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
 
@@ -227,15 +264,6 @@ class PhantomxThesisEnv(DirectRLEnv):
         current_air_times = self._contact_sensor.data.current_air_time[:, self._die_body_ids]
         lazy_legs = (current_air_times > 1.0).float().sum(dim=-1)
 
-        # Femur flip penalty — j_thigh_* steht per Default bei +0.5 rad. Rotiert ein Femur unter
-        # 0, kippt das Bein in eine anatomisch verkehrte Konfiguration ("Femur zeigt nach unten
-        # statt nach oben"), bei der die Tibia flach auf dem Boden liegt und nur noch geschleift
-        # statt normal aufgesetzt wird (beobachtet: 4/6 Beine korrekt, 2/6 gekippt). Bestraft nur
-        # die negative Auslenkung (relu), damit normale positive Federung/Schrittbewegung des
-        # Femurs beim Gehen nicht eingeschränkt wird.
-        femur_pos = self._robot.data.joint_pos[:, self._femur_joint_ids]
-        femur_flip_penalty = torch.sum(torch.clamp(-femur_pos, min=0.0), dim=-1)
-
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped  * self.cfg.lin_vel_reward_scale       * self.step_dt,
             "track_ang_vel_z_exp":  yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale       * self.step_dt,
@@ -251,7 +279,6 @@ class PhantomxThesisEnv(DirectRLEnv):
             "foot_contact":         foot_contact_reward    * self.cfg.foot_contact_reward_scale   * self.step_dt,
             "tripod_gait":          tripod_score           * self.cfg.tripod_gait_reward_scale    * self.step_dt,
             "lazy_legs":           -lazy_legs              * self.cfg.lazy_leg_penalty_scale      * self.step_dt,
-            "femur_flip_l2":        femur_flip_penalty     * self.cfg.femur_flip_penalty_scale    * self.step_dt,
         }
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -283,7 +310,14 @@ class PhantomxThesisEnv(DirectRLEnv):
             # der Max-Wert der letzten Curriculum-Stufe, in früheren Stufen mit kleinerem
             # Kommando also unerreichbar und damit fast permanent aktiv).
             is_moving_forward = forward_speed > command_speed
-            return (~is_moving_forward).float()
+            deficit_penalty = (~is_moving_forward).float()
+
+            # Overshoot: proportionale Zusatzstrafe für zu schnelles Laufen, über denselben
+            # movement_penalty_scale skaliert (kein eigener Scale-Wert — track_lin_vel_xy_exp
+            # allein reagiert bei PPOs breitem lin_vel_kernel_width=0.25 zu schwach auf
+            # Überschreiten, SAC braucht das nicht, siehe engerer Kernel dort).
+            overshoot_penalty = torch.clamp(forward_speed - command_speed, min=0.0)
+            return deficit_penalty + overshoot_penalty
 
         # Continuous: proportionales Defizit zwischen Kommando und Ist-Geschwindigkeit, nur wenn
         # überhaupt ein nennenswertes Vorwärtskommando anliegt (Schwelle relativ zu movement_speed_x,
@@ -301,10 +335,16 @@ class PhantomxThesisEnv(DirectRLEnv):
         gravity = self._robot.data.projected_gravity_b
         tilt = torch.sum(torch.square(gravity[:, :2]), dim=1)
 
+        # Terminiert, sobald irgendein Body außer der Tibia (letztes Glied) Bodenkontakt hat —
+        # Körper/Coxa/Femur schleifen ist nie eine gültige Stützpose, anders als ein aufsetzender Fuß.
+        non_foot_forces = self._contact_sensor.data.net_forces_w[:, self._non_foot_body_ids, :]
+        non_foot_contact = torch.any(torch.norm(non_foot_forces, dim=-1) > 1.0, dim=-1)
+
         died = (
             (mp_body_height < self.cfg.termination_height) |
             (mp_body_height > 0.30) |
-            (tilt > self.cfg.termination_tilt)
+            (tilt > self.cfg.termination_tilt) |
+            non_foot_contact
         )
 
         return died, time_out
@@ -368,6 +408,12 @@ class PhantomxThesisEnv(DirectRLEnv):
         extras["Metrics/avg_forward_speed_mps"] = torch.mean(avg_forward_speed)
         self._episode_speed_sum[env_ids] = 0.0
 
+        # True average MP_BODY height (m) over the episode that just ended — same per-step-average
+        # pattern as avg_forward_speed_mps above, directly comparable to target_base_height.
+        avg_body_height = self._episode_height_sum[env_ids] / episode_steps
+        extras["Metrics/avg_body_height_m"] = torch.mean(avg_body_height)
+        self._episode_height_sum[env_ids] = 0.0
+
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
 
@@ -392,7 +438,7 @@ class PhantomxThesisEnv(DirectRLEnv):
                 self._commands[env_ids] = 0.0
             elif steps < 350_000:
                 self._commands[env_ids] = 0.0
-                self._commands[env_ids, 0] = max_speed / 2
+                self._commands[env_ids, 0] = max_speed / 2.0
             else:
                 self._commands[env_ids] = 0.0
                 self._commands[env_ids, 0] = max_speed

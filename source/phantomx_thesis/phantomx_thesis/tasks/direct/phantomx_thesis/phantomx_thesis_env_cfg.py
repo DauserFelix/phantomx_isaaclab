@@ -28,61 +28,61 @@ from isaaclab_assets.robots.phantomx import PHANTOMX_CFG  # isort: skip
 # 'curriculum=True' bedeutet: leichtere Terrains zuerst,
 # der Roboter wird nach Performance auf schwierigere versetzt.
 
-# ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
-#     seed=42,
-#     size=(8.0, 8.0),            # Größe jedes Sub-Terrains in Metern
-#     border_width=0.5,          # Breiter Rand damit Roboter nicht rausfällt
-#     num_rows=30,                # Anzahl Terrain-Reihen (Difficulty-Levels)
-#     num_cols=32,                # Anzahl Terrain-Spalten (Variationen pro Level)
-#     horizontal_scale=0.1,       # Auflösung des Height-Fields (m/pixel)
-#     vertical_scale=0.005,       # Vertikale Skalierung (m/unit)
-#     slope_threshold=0.75,       # Max Steigung bevor Terrain als Wand gilt
-#     difficulty_range=(0.0, 1.0),
-#     use_cache=False,
-#     curriculum=False,            # Curriculum: einfach → schwer
-#     sub_terrains={
-#         # Flaches Terrain als Einstieg (20%)
-#         "flat": mesh_gen.MeshPlaneTerrainCfg(
-#             proportion=0.2,
-#         ),
-#         # Zufälliges Rauschen - leicht uneben (20%)
-#         # Gut für Hexapod: simuliert Gras/Kies/unebenen Boden
-#         "random_rough": hf_gen.HfRandomUniformTerrainCfg(
-#             proportion=0.2,
-#             noise_range=(0.02, 0.08),   # Höhe der Unebenheiten in Metern
-#             noise_step=0.02,
-#             border_width=0.25,
-#         ),
-#         # Diskrete Hindernisse - Klötze/Steine (20%)
-#         # Herausfordernd für Hexapod: Beine müssen hochheben
-#         "discrete_obstacles": hf_gen.HfDiscreteObstaclesTerrainCfg(
-#             proportion=0.2,
-#             obstacle_height_mode="fixed",
-#             obstacle_width_range=(0.05, 0.2),   # Breite der Hindernisse
-#             obstacle_height_range=(0.02, 0.06), # Höhe: konservativ für Hexapod
-#             num_obstacles=60,
-#             platform_width=2.0,
-#         ),
-#         # Geneigte Pyramide (20%)
-#         # Trainiert Gleichgewicht auf Schrägen
-#         "pyramid_slope": hf_gen.HfPyramidSlopedTerrainCfg(
-#             proportion=0.2,
-#             slope_range=(0.0, 0.3),     # Neigungswinkel in rad (0.3 ≈ 17°)
-#             platform_width=2.0,
-#             border_width=0.25,
-#         ),
-#         # Treppenstufen (20%)
-#         # Schwierigste Variante - Beine müssen klar heben
-#         "pyramid_stairs": mesh_gen.MeshPyramidStairsTerrainCfg(
-#             proportion=0.2,
-#             step_height_range=(0.02, 0.08), # Stufenhöhe: klein für Hexapod
-#             step_width=0.3,
-#             platform_width=3.0,
-#             border_width=1.0,
-#             holes=False,
-#         ),
-#     },
-# )
+ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+    seed=42,
+    size=(8.0, 8.0),            # Größe jedes Sub-Terrains in Metern
+    border_width=0.5,          # Breiter Rand damit Roboter nicht rausfällt
+    num_rows=30,                # Anzahl Terrain-Reihen (Difficulty-Levels)
+    num_cols=32,                # Anzahl Terrain-Spalten (Variationen pro Level)
+    horizontal_scale=0.1,       # Auflösung des Height-Fields (m/pixel)
+    vertical_scale=0.005,       # Vertikale Skalierung (m/unit)
+    slope_threshold=0.75,       # Max Steigung bevor Terrain als Wand gilt
+    difficulty_range=(0.0, 1.0),
+    use_cache=False,
+    curriculum=True,            # Curriculum: einfach → schwer
+    sub_terrains={
+        # Flaches Terrain als Einstieg (20%)
+        "flat": mesh_gen.MeshPlaneTerrainCfg(
+            proportion=0.2,
+        ),
+        # Zufälliges Rauschen - leicht uneben (20%)
+        # Gut für Hexapod: simuliert Gras/Kies/unebenen Boden
+        "random_rough": hf_gen.HfRandomUniformTerrainCfg(
+            proportion=0.2,
+            noise_range=(0.02, 0.08),   # Höhe der Unebenheiten in Metern
+            noise_step=0.02,
+            border_width=0.25,
+        ),
+        # Diskrete Hindernisse - Klötze/Steine (20%)
+        # Herausfordernd für Hexapod: Beine müssen hochheben
+        "discrete_obstacles": hf_gen.HfDiscreteObstaclesTerrainCfg(
+            proportion=0.2,
+            obstacle_height_mode="fixed",
+            obstacle_width_range=(0.05, 0.2),   # Breite der Hindernisse
+            obstacle_height_range=(0.02, 0.06), # Höhe: konservativ für Hexapod
+            num_obstacles=60,
+            platform_width=2.0,
+        ),
+        # Geneigte Pyramide (20%)
+        # Trainiert Gleichgewicht auf Schrägen
+        "pyramid_slope": hf_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.2,
+            slope_range=(0.0, 0.3),     # Neigungswinkel in rad (0.3 ≈ 17°)
+            platform_width=2.0,
+            border_width=0.25,
+        ),
+        # Treppenstufen (20%)
+        # Schwierigste Variante - Beine müssen klar heben
+        "pyramid_stairs": mesh_gen.MeshPyramidStairsTerrainCfg(
+            proportion=0.2,
+            step_height_range=(0.02, 0.08), # Stufenhöhe: klein für Hexapod
+            step_width=0.3,
+            platform_width=3.0,
+            border_width=1.0,
+            holes=False,
+        ),
+    },
+)
 
 
 
@@ -120,8 +120,11 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     episode_length_s = 40.0
     decimation = 4
-    action_scale = 0.5        # Policy gibt direkte ±0.5 rad Abweichung von Default-Pose
-    joint_pos_limit: float = 0.7854  #0.7854=45grad #0.5235  # ±30° um Default-Stellung (π/6) — verhindert mechanisch gefährliche Posen
+    action_scale = 0.75       # Policy gibt direkte ±0.75 rad Abweichung von Default-Pose
+    joint_pos_limit: float = 1.0  # ≈57.3° um Default-Stellung — proportional mit action_scale mitgezogen
+                                   # (0.75/1.0, dieselbe relative Marge wie vorher 0.5/0.7854), damit das
+                                   # Clamp in _pre_physics_step weiterhin nur als Sicherheitsnetz wirkt und
+                                   # nicht bei Policy-Sättigung nahe ±1 ständig scharf eingreift
     action_space = 18  # PhantomX: 6 legs × 3 joints = 18 DOF
 
     # Observation space:
@@ -154,39 +157,39 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     # TERRAIN - Unstrukturiertes Rough Terrain
     # =====================================================
-    # terrain = TerrainImporterCfg(
-    #     prim_path="/World/ground",
-    #     terrain_type="generator",           # "generator" statt "plane"
-    #     terrain_generator=ROUGH_TERRAINS_CFG,
-    #     collision_group=-1,
-    #     physics_material=sim_utils.RigidBodyMaterialCfg(
-    #         friction_combine_mode="multiply",
-    #         restitution_combine_mode="multiply",
-    #         static_friction=1.0,
-    #         dynamic_friction=1.0,
-    #         restitution=0.0,
-    #     ),
-    #     visual_material=sim_utils.MdlFileCfg(
-    #         mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
-    #         project_uvw=True,
-    #     ),
-    #     debug_vis=False,
-    # )
-
     terrain = TerrainImporterCfg(
-    prim_path="/World/ground",
-    terrain_type="plane",
-    collision_group=-1,
-    physics_material=sim_utils.RigidBodyMaterialCfg(
-        friction_combine_mode="multiply",
-        restitution_combine_mode="multiply",
-        static_friction=1.0,
-        dynamic_friction=1.0,
-        restitution=0.0,
-    ),
+        prim_path="/World/ground",
+        terrain_type="generator",           # "generator" statt "plane"
+        terrain_generator=ROUGH_TERRAINS_CFG,
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        visual_material=sim_utils.MdlFileCfg(
+            mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
+            project_uvw=True,
+        ),
+        debug_vis=False,
+    )
 
-    debug_vis=False,
-)
+    # terrain = TerrainImporterCfg(
+    # prim_path="/World/ground",
+    # terrain_type="plane",
+    # collision_group=-1,
+    # physics_material=sim_utils.RigidBodyMaterialCfg(
+    #     friction_combine_mode="multiply",
+    #     restitution_combine_mode="multiply",
+    #     static_friction=1.0,
+    #     dynamic_friction=1.0,
+    #     restitution=0.0,
+    # ),
+    #
+    # debug_vis=False,
+    # )
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -213,7 +216,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.10    # MP_BODY at normal standing height (~20cm above ground)
+    target_base_height = 0.11    # MP_BODY at normal standing height (~20cm above ground)
     movement_speed_x = 0.075     # 7.5 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.075 m/s)
     yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
 
@@ -223,7 +226,11 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     lin_vel_kernel_width: float = 0.25    # Breite des exp(-error/width) Tracking-Kernels (lin_vel)
     ang_vel_kernel_width: float = 0.25    # dito für yaw_rate
-    strict_action_pipeline: bool = False  # True: Actions vor Nutzung auf [-1,1] und q_def±joint_pos_limit klemmen
+    # True: Actions vor Nutzung auf [-1,1] und q_def±joint_pos_limit klemmen. Für PPO UND SAC aktiv
+    # (identisch zu SAC, das bereits so lief) — schließt eine dokumentierte Sim-to-Real-Lücke: das
+    # ROS2-Deployment (phantomx_policy_simulation_interface.py) klemmt Actions/Joint-Targets schon
+    # länger, PPO wurde bisher aber komplett ungeklemmt trainiert.
+    strict_action_pipeline: bool = True
     continuous_movement_penalty: bool = False  # True: kontinuierlicher velocity-deficit statt binärer Penalty
     use_sac_curriculum: bool = False      # True: schnellere, kommandorandomisierte Rampe statt 100k/350k-Stufen
     clamp_reward: bool = False            # True: Gesamt-Reward auf ±reward_clamp_value geklemmt (Schutz vor
@@ -231,17 +238,17 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
                                            # Replay-Buffer-Samples dominieren — siehe Q1(min)-Divergenz-Diagnose)
     reward_clamp_value: float = 20.0      # nur wirksam wenn clamp_reward=True
 
-    # =====================================================
+    # =======================================   ==============
     # REWARD SCALES - TUNED FOR HEXAPOD LOCOMOTION
     # =====================================================
     #🎯 TRACKING REWARDS (positive)
-    lin_vel_reward_scale = 10.0
+    lin_vel_reward_scale = 12.0      #10 hat gut funktioniert
     yaw_rate_reward_scale = 4.0
 
     height_reward_scale = 5.0    # mit step_dt in env: 5.0 × 0.02 = 0.1/step max (wie 21.04. Working-Model)
 
     # 🚫 PENALTIES (negative)
-    z_vel_reward_scale = -2.0
+    z_vel_reward_scale = -3.0
     ang_vel_reward_scale = -7.0
     joint_torque_reward_scale = 0.0#-2e-5
     # Gelenkbeschleunigungs-Strafe gegen hektische/ruckartige Bewegung. Startwert -2.5e-7
@@ -250,13 +257,21 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # (das war die eigentliche Ursache der früheren Q-Divergenz, nicht der Scale-Wert selbst).
     # Für PPO und SAC bewusst gleich — kein separater SAC-Override mehr, um genau das
     # "stille Überschreiben"-Bugmuster von vorhin nicht zu wiederholen.
-    joint_accel_reward_scale = -2.5e-7
+    joint_accel_reward_scale = -1.5e-7    #2.5e-7 hat ok funktioniert
     joint_accel_clamp: float = 5.0e7    # Deckel auf sum(joint_acc²) VOR der Skalierung —
-                                          # Startwert, via Episode_Reward/dof_acc_l2 beobachten
+                                          # Startwert, via Episode_Reward/dof_acc_l2 beobachten.
+                                          # Nach action_scale 0.5→0.75 (1.5x größere mögliche
+                                          # Gelenkauslenkung pro Aktion) erneut prüfen, ob dof_acc_l2
+                                          # jetzt am Clamp klebt — Beschleunigungs-Obergrenze skaliert
+                                          # potenziell mit dem Quadrat der Auslenkung (~2.25x)
     action_rate_reward_scale = -0.02
     flat_orientation_reward_scale = -3.0
 
-    movement_penalty_scale = 25.0       #10 hat gut funktioniert
+    # movement_penalty_scale deckt jetzt beide Richtungen ab: Unterschreiten (binär, PPO) plus
+    # proportionales Überschreiten (siehe _compute_movement_penalty) — bewusst ein gemeinsamer
+    # Scale-Wert statt eines eigenen, damit nicht zwei Stellschrauben für dasselbe Tracking-Ziel
+    # gepflegt werden müssen.
+    movement_penalty_scale = 15.0       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
 
     alive_reward_scale = 0.3
 
@@ -269,22 +284,38 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # 😴 LAZY LEG PENALTY — Strafe für Beine die >1s dauerhaft in der Luft hängen
     lazy_leg_penalty_scale = 0.5
 
-    # 🕷️ FEMUR FLIP PENALTY — bestraft Femur-Gelenke (j_thigh_*), die unter 0 rad rotieren und
-    # damit in die anatomisch verkehrte Richtung kippen (Default +0.5 rad = "zeigt nach oben").
-    # Startwert — via Episode_Reward/femur_flip_l2 in TensorBoard beobachten und ggf. nachjustieren.
-    femur_flip_penalty_scale = -5.0
-
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
-    termination_height = 0.07    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
-    termination_tilt = 0.04     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
+    termination_height = 0.10    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
+    termination_tilt = 0.03     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
+
+
+@configclass
+class PhantomxThesisFlatEnvCfg(PhantomxThesisEnvCfg):
+    """Flat-Terrain-Variante der PPO-Basis-Cfg: identischer Reward-/Observation-/Curriculum-Code,
+    nur die Bodenebene ist wieder eine reine Plane statt des generierten Rough-Terrains — für ein
+    "normales" Modell auf ebenem Boden, ohne die Rough-Terrain-Cfg der Basisklasse anzufassen."""
+
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
 
 
 @configclass
 class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     """SAC-Variante: eigene Reward-/Curriculum-Feinabstimmung (Ziel: langsames, sauberes Gehen
-    bis 5 cm/s), ohne die PPO-Cfg oben zu berühren. Physik-/Observation-Code bleibt in
+    bis 7.5 cm/s), ohne die PPO-Cfg oben zu berühren. Physik-/Observation-Code bleibt in
     PhantomxThesisEnv gemeinsam — nur diese Werte weichen vom PPO-Default ab."""
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
@@ -293,7 +324,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.10
+    target_base_height = 0.11
     movement_speed_x = 0.075
     yaw_rotation_speed_x = 0.0
 
@@ -315,9 +346,34 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     ang_vel_kernel_width = 0.1   # unverändert — für SAC aktuell wirkungslos (yaw_rotation_speed_x=0,
                                   # commands[:,2] immer 0), nicht Teil des Geh-Problems
 
-    strict_action_pipeline = True        # Actions vor Nutzung klemmen (siehe PhantomxThesisEnvCfg)
-    continuous_movement_penalty = True   # kontinuierlicher velocity-deficit statt binaerer Penalty
+    # strict_action_pipeline: kein eigener SAC-Override mehr — jetzt auch für PPO True in der
+    # Basisklasse, beide erben denselben Wert (vermeidet das in Log 07-12/Punkt 16 dokumentierte
+    # Bugmuster stiller, ungenutzter Overrides).
+    continuous_movement_penalty = True   # kontinuierlicher velocity-deficit statt binaerer Penalty —
+                                          # die neue Overshoot-Strafe lebt nur im binären (PPO-)Zweig
+                                          # von _compute_movement_penalty, SAC bleibt also unverändert
     use_sac_curriculum = True            # schnellere, kommandorandomisierte Rampe (fertig ab 100k)
     clamp_reward = True                  # off-policy Replay ist anfällig für einzelne Ausreißer-Samples,
                                           # die einen ganzen Batch dominieren (PPO's on-policy Rollouts
                                           # mitteln das pro Update weg) — siehe Q1(min)=-101-Diagnose
+
+
+@configclass
+class PhantomxThesisSACFlatEnvCfg(PhantomxThesisSACEnvCfg):
+    """Flat-Terrain-Variante der SAC-Cfg: identischer Reward-/Curriculum-Code wie
+    PhantomxThesisSACEnvCfg, nur die Bodenebene ist wieder eine reine Plane statt des von der
+    PPO-Basisklasse geerbten generierten Rough-Terrains."""
+
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )

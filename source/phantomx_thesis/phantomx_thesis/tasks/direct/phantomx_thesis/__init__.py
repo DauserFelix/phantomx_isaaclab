@@ -13,11 +13,27 @@ from . import agents
 
 
 gym.register(
-    id="Template-Phantomx-Thesis-Direct-v0",
+    id="Template-Phantomx-Thesis-PPO-Direct_uneven-v0",
     entry_point=f"{__name__}.phantomx_thesis_env:PhantomxThesisEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.phantomx_thesis_env_cfg:PhantomxThesisEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+        "skrl_amp_cfg_entry_point": f"{agents.__name__}:skrl_amp_cfg.yaml",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+    },
+)
+
+# Flat-Terrain-Variante der PPO-Task: gleiche Env-Klasse/Reward-Code, nur Bodenebene statt
+# generiertem Rough-Terrain (PhantomxThesisFlatEnvCfg) — eigene gym-ID, damit ein "normales"
+# Modell weiterhin auf ebenem Boden trainiert werden kann, ohne die Rough-Terrain-Basis-Cfg
+# anzufassen oder Dateien vor jedem Lauf manuell umzukommentieren.
+gym.register(
+    id="Template-Phantomx-Thesis-PPO-Direct-v0",
+    entry_point=f"{__name__}.phantomx_thesis_env:PhantomxThesisEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.phantomx_thesis_env_cfg:PhantomxThesisFlatEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
         "skrl_amp_cfg_entry_point": f"{agents.__name__}:skrl_amp_cfg.yaml",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
@@ -30,11 +46,23 @@ gym.register(
 # PPO-Task ungewollt SAC-Werte erbt oder umgekehrt (zwei gym-IDs statt einer, nach dem
 # Muster von isaaclab_tasks/direct/anymal_c/__init__.py Flat/Rough-Varianten).
 gym.register(
-    id="Template-Phantomx-Thesis-SAC-Direct-v0",
+    id="Template-Phantomx-Thesis-SAC-Direct_uneven-v0",
     entry_point=f"{__name__}.phantomx_thesis_env:PhantomxThesisEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.phantomx_thesis_env_cfg:PhantomxThesisSACEnvCfg",
+        "skrl_sac_cfg_entry_point": f"{agents.__name__}:skrl_sac_cfg.yaml",
+    },
+)
+
+# Flat-Terrain-Variante der SAC-Task, nach demselben Muster wie die PPO-Flat-Task oben —
+# PhantomxThesisSACFlatEnvCfg erbt SAC-Reward-/Curriculum-Tuning, aber mit ebener Bodenplane.
+gym.register(
+    id="Template-Phantomx-Thesis-SAC-Direct-v0",
+    entry_point=f"{__name__}.phantomx_thesis_env:PhantomxThesisEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.phantomx_thesis_env_cfg:PhantomxThesisSACFlatEnvCfg",
         "skrl_sac_cfg_entry_point": f"{agents.__name__}:skrl_sac_cfg.yaml",
     },
 )

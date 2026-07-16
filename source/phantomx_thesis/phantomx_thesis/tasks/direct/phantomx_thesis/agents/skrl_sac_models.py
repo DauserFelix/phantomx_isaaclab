@@ -19,7 +19,7 @@ def compute_action_scaling_direct(env, device: str | torch.device) -> tuple[torc
     """Compute physics-based action bounds for a DirectRLEnv (Fix 1).
 
     For the PhantomX with symmetric joint limits:
-        action_range  = joint_pos_limit / action_scale = 0.5235 / 0.5 = 1.047
+        action_range  = joint_pos_limit / action_scale = 1.0 / 0.75 = 1.333
         action_bias   = 0.0  (symmetric around default pose)
 
     Returns:
