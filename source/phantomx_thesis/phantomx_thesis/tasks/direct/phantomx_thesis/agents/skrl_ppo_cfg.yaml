@@ -50,7 +50,11 @@ agent:
   ratio_clip: 0.2
   value_clip: 0.2
   clip_predicted_values: True
-  entropy_loss_scale: 0.01  # etwas höher für bessere Exploration am Anfang
+  entropy_loss_scale: 0.005  # war 0.01 — halbiert, um den unopponierten Entropy-Bonus-Gradienten
+                             # zu bremsen (Ursache der wiederholt beobachteten Policy-Std-Explosion
+                             # bis exp(max_log_std), siehe std_debug.txt-Analysen). clip_actions
+                             # NICHT als Gegenmaßnahme genutzt (kollidiert mit dem Env-seitigen
+                             # Clamp in _pre_physics_step, siehe Session-Historie).
   value_loss_scale: 1.0
   kl_threshold: 0.0
   rewards_shaper_scale: 0.5

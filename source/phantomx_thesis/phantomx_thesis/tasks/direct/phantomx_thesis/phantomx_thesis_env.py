@@ -300,7 +300,7 @@ class PhantomxThesisEnv(DirectRLEnv):
 
         # Lazy leg penalty — Beine die dauerhaft (>2.5s) in der Luft hängen
         current_air_times = self._contact_sensor.data.current_air_time[:, self._die_body_ids]
-        lazy_legs = (current_air_times > 2.5).float().sum(dim=-1)
+        lazy_legs = (current_air_times > 3.0).float().sum(dim=-1)
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped  * self.cfg.lin_vel_reward_scale       * self.step_dt,
@@ -331,10 +331,6 @@ class PhantomxThesisEnv(DirectRLEnv):
         # PhantomxThesisSACEnvCfg.clamp_reward) — PPO's reward path is unchanged by default.
         if self.cfg.clamp_reward:
             reward = torch.clamp(reward, -self.cfg.reward_clamp_value, self.cfg.reward_clamp_value)
-
-        if self.common_step_counter % 100 == 0:
-            for key, value in rewards.items():
-                print(f"{key:22s} min={value.min().item():8.3f}  mean={value.mean().item():8.3f}")
 
         for key, value in rewards.items():
             self._episode_sums[key] += value

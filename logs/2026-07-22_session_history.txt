@@ -226,23 +226,225 @@ KEINE Code-Änderung an env.py/env_cfg.py/den YAMLs in dieser Session — alle A
 
 
 --------------------------------------------------------------------------------
-9. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+9. LATEX-ABSCHNITTE "SIMULATION ENVIRONMENT", "DOMAIN RANDOMIZATION STRATEGY",
+   "CURRICULUM LEARNING" (STRUCTURED/UNSTRUCTURED) FÜR DIE THESIS
 --------------------------------------------------------------------------------
 
-1. PPO-Entropie-Fix (clip_actions:True, max_log_std runter) weiterhin nicht umgesetzt — seit
-   Log 07-09 wiederholt empfohlen, jetzt zusätzlich durch die Vermutung aus Punkt 4 gestützt
-   (clip_actions:False als Hauptverdächtiger, nicht nur die Bonus-Größe).
-2. target_base_height/Height-Kernel-Mismatch aus Punkt 5 — reale Standhöhe empirisch
-   bestätigen (Default-Pose halten, MP_BODY-Höhe ohne Policy-Aktion ablesen), danach
-   target_base_height UND den hartcodierten Kernel-Divisor (0.02) gemeinsam neu kalibrieren.
-3. Externe Reward-Konflikt-Analyse aus Punkt 3 bleibt widerlegt/ungeklärt in der Herkunft der
-   [32,32]-Werte — falls der User das für die Thesis nutzen will, sollte die Quelle geklärt
-   und der Text entsprechend korrigiert werden (Angebot steht, noch nicht angenommen).
-4. Der neue Report (logs/agent_evaluation_report.txt) referenziert Runs, die jetzt Teil der
-   dauerhaften Projekt-Historie sind — bei zukünftigen neuen Trainingsläufen den Report
-   manuell nachziehen, kein automatischer Trigger vorhanden.
-5. Alle aus Log 07-20 bereits offenen Punkte bleiben unverändert offen (Strafing/Kurven-Plan
+Auftrag: vier Thesis-Abschnitte anhand vorgegebener Struktur/Teilprosa ausformulieren.
+
+VERIFIKATION GEGEN CODE (nicht die Vorlage blind übernommen):
+  - "Isaac Gym" in der Vorlage zu "Isaac Lab" korrigiert (tatsächlich verwendetes Framework,
+    per Imports in phantomx_thesis_env_cfg.py bestätigt).
+  - Domain-Randomization-Liste der Vorlage GEGEN EventCfg (phantomx_thesis_env_cfg.py:100-123)
+    geprüft: NUR 2 EventTerms tatsächlich implementiert (Reibung static∈[0.7,1.0]/
+    dynamic∈[0.5,0.8] via randomize_rigid_body_material, Rumpfmasse ±0.5kg additiv via
+    randomize_rigid_body_mass), beide mode="startup" (einmalig pro Env, nicht pro Episode).
+    In der Vorlage genannte "Aktuatorverzögerungen" — KEIN Treffer für delay/latency im
+    gesamten Env-Code, NICHT implementiert. "Dämpfungskoeffizienten" — Kp/Kd sind fixe Werte
+    (10.0/2.0 in phantomx.py), NICHT randomisiert. Sensorrauschen existiert zwar
+    (_get_observations(), fixe Gauß-σ auf lin_vel/ang_vel/gravity/jpos/jvel), ist aber kein
+    EventTerm-Domain-Randomization-Mechanismus, sondern hartcodiert — im Text als separater,
+    klar abgegrenzter Punkt behandelt statt mit der physikalischen Randomization vermischt.
+  - Curriculum-Abschnitte auf Basis des echten Codes beschrieben (_apply_velocity_curriculum,
+    _apply_terrain_curriculum, _init_terrain_grid) statt nur die vorgegebene Prosa zu
+    übernehmen — inkl. des seit Log 07-16 existierenden distanzbasierten Terrain-Auf-/
+    Abstufungsmechanismus.
+
+ERGEBNIS: vollständiger .tex-Text nur im Scratchpad
+(/tmp/.../scratchpad/sim_domainrand_curriculum_section.tex), NICHT ins Projekt-Repo
+geschrieben. Dem User die Korrekturen gegenüber seiner Vorlage explizit mitgeteilt (v.a. dass
+Aktuatorverzögerung/Damping-Randomization NICHT umgesetzt sind, damit die Thesis nichts
+behauptet, was der Code nicht hergibt).
+
+
+--------------------------------------------------------------------------------
+10. REIBUNGS-EINSCHÄTZUNG FÜR REALE HARDWARE (PLA-FÜSSE AUF HOLZBODEN) — ANALYSIERT UND
+    ANGEPASST
+--------------------------------------------------------------------------------
+
+User-Frage: aktuelle Reibungswerte wirken hoch, wie einzuschätzen für reale Hardware (PLA-
+3D-Druck-Beine auf Holzboden)?
+
+ANALYSE: effektive Reibung ergibt sich aus Boden (static/dynamic_friction=1.0, an 3 Terrain-
+Stellen in env_cfg.py) MULTIPLIZIERT (friction_combine_mode="multiply") mit den randomisierten
+Roboter-Bein-Werten (vorher static∈[0.7,1.0], dynamic∈[0.5,0.8]) — effektiv also bereits
+[0.7,1.0] statisch / [0.5,0.8] dynamisch. Das entspricht eher Gummi-auf-Beton als hartem
+Kunststoff auf glattem Holz. Literatur-/Erfahrungswerte für PLA (auch rau von FDM-Druck) auf
+Holz: ~0.2-0.45 statisch — deutlich niedriger. Damit lag die Simulation vor dem Fix bei etwa
+2-3x der real zu erwartenden Reibung, ein bisher nicht dokumentierter Sim-to-Real-Gap-Faktor.
+
+FIX (auf Anweisung "passe die Reibung an" umgesetzt): phantomx_thesis_env_cfg.py, EventCfg.
+physics_material (Zeile ~103-117):
+  static_friction_range:  (0.7, 1.0) -> (0.25, 0.45)
+  dynamic_friction_range: (0.5, 0.8) -> (0.2, 0.35)
+Bewusst NUR die Roboter-Bein-Werte geändert, Boden-static/dynamic_friction=1.0 an allen 3
+Terrain-Stellen UNVERÄNDERT gelassen — eine einzige, klar zuordenbare Stellschraube statt
+mehrerer gleichzeitig. Gilt für PPO UND SAC (gemeinsame EventCfg-Basisklasse). py_compile
+fehlerfrei.
+
+WICHTIGER HINWEIS (dem User mitgeteilt): das ist eine spürbare Verhaltensänderung, kein reiner
+Bugfix — geringere Reibung erhöht Rutschgefahr beim Anfahren/Bremsen/Kurvenlauf, interagiert
+mit den bereits fein austarierten Reward-Termen (Movement Penalty, Tripod-Gait). Empfehlung:
+FRISCHER Trainingslauf statt Resume eines alten (mit alter, griffigerer Reibung trainierten)
+Checkpoints.
+
+
+--------------------------------------------------------------------------------
+11. ZWISCHENFRAGE: SINN VON action_scale=0.75
+--------------------------------------------------------------------------------
+
+User fragte nach "action space 0.75" — geklärt, dass damit vermutlich action_scale (nicht der
+eigentliche, unveränderliche action_space=18) gemeint war. Durchgerechnet gegen
+Aktuator-Grenzen: action_scale=0.75 rad Ziel-Delta pro Policy-Schritt vs.
+velocity_limit=0.8 rad/s x policy_dt=0.02s = nur ~0.016 rad tatsächlich pro Schritt erreichbare
+Auslenkung — das Ziel-Delta ist also >45x größer als das, was der PD-Regler in einem einzelnen
+Schritt überhaupt umsetzen kann. Kein Bug (Regler integriert über mehrere Schritte auf), aber
+erklärt strukturell große PD-Regelfehler bei aggressiven Policy-Änderungen und passt zu den in
+früheren Logs schon dokumentierten dof_acc_l2-Anstiegen nach der 0.5->0.75-Erhöhung
+(Session 07-11/07-14). Keine Code-Änderung, nur Einordnung — User hat nicht nach einer
+Anpassung gefragt.
+
+
+--------------------------------------------------------------------------------
+12. TERMINAL-DEBUG-OUTPUT ENTFERNT: PER-TERM-REWARD-PRINT UND STD_DEBUG-HOOK IN DATEIEN
+    UMGELEITET
+--------------------------------------------------------------------------------
+
+User-Wunsch: das Per-Term-Reward-Debug-Print (min/mean je Reward-Key, alle 100 Steps, seit
+Log 07-14 dauerhaft im Code) soll nicht mehr im Terminal erscheinen; der neu gebaute
+STD_DEBUG-Hook (siehe vorheriger Kontext dieser Session, in scripts/skrl/train.py) soll seine
+Werte ebenfalls nicht mehr ins Terminal drucken, sondern in eine .txt neben den Checkpoints
+schreiben.
+
+UMGESETZT:
+  - phantomx_thesis_env.py, _get_rewards(): der komplette
+    "if self.common_step_counter % 100 == 0: for key, value in rewards.items(): print(...)"
+    Block ENTFERNT (Zeilen ehemals ~335-337). Die Akkumulation in self._episode_sums (für
+    TensorBoard Episode_Reward/*) bleibt unverändert bestehen — nur das Terminal-Print ist weg.
+  - scripts/skrl/train.py, _attach_std_debug_hook(): print(...) durch Datei-Append ersetzt.
+    Pfad: os.path.join(agent.experiment_dir, "std_debug.txt") — agent.experiment_dir ist
+    exakt der Run-Ordner, der auch checkpoints/ enthält (skrl base.py:148), liegt also direkt
+    daneben. Tab-separierte Zeilen mit Header (step, log_std_min/mean/max, std_min/mean/max,
+    entropy_loss, learning_rate, tensorboard_std_mean), Header wird beim ersten Schreiben
+    automatisch ergänzt (os.path.isfile-Check). os.makedirs(..., exist_ok=True) vor jedem
+    Schreiben als Sicherheitsnetz.
+  - py_compile beider Dateien fehlerfrei.
+
+Konkreter erster Lauf mit diesem Hook: logs/skrl/phantomx_ppo/2026-07-22_10-03-15_ppo_torch/
+std_debug.txt — Analyse in Punkt 13.
+
+
+--------------------------------------------------------------------------------
+13. STD_DEBUG.TXT-ANALYSE — ENTROPY-BONUS ALS ALLEINIGER TREIBER BESTÄTIGT, EXPONENTIELLE
+    BESCHLEUNIGUNG UND ENTROPY_LOSS-VORZEICHENWECHSEL BEOBACHTET
+--------------------------------------------------------------------------------
+
+Zwei aufeinanderfolgende Analysen derselben, während der Session weiterlaufenden Datei
+(logs/skrl/phantomx_ppo/2026-07-22_10-03-15_ppo_torch/std_debug.txt), erst bei Step 10.320
+(87 Zeilen), dann bei Step 54.000 (447 Zeilen) — beide Male VOR jedem Curriculum-Phasenwechsel
+(erster Wechsel erst bei Step 100.000).
+
+BEFUND 1 (schon bei 10k Steps sichtbar): σ steigt von der allerersten geloggten Zeile an,
+monoton, glatt, ohne jeden Rückschritt. entropy_loss fällt dabei (0.104->0.080), obwohl der
+Entropy-Bonus laut skrl-Formel (-entropy_loss_scale * entropy) der alleinige Treiber ist —
+aufgelöst durch Nachrechnung der Gaussian-Differentialentropie: bei kleinem σ (<~0.242 pro
+Dimension) ist die Entropie selbst negativ, wodurch entropy_loss positiv wird, aber der
+GRADIENT bezüglich log_std bleibt trotzdem konstant nach oben gerichtet, unabhängig vom
+Vorzeichen des geloggten Werts.
+
+BEFUND 2 (neu bei 54k Steps sichtbar, bestätigt Vorhersage aus Befund 1): entropy_loss
+wechselt exakt bei Step ~44.040 das Vorzeichen (von +0.0002 auf -0.0001), an der Stelle wo
+std_mean~0.242 erreicht — passt exakt zur analytisch hergeleiteten Nullstelle
+sigma=1/sqrt(2*pi*e)~0.2420 der Gaussian-Entropie. Kein Trainingsartefakt, reine Mathematik.
+ZUSÄTZLICH beobachtet: die WACHSTUMSRATE von std_mean beschleunigt sich sichtbar (von ~0.0021
+auf ~0.0033 std-Einheiten/1000 Steps, +57%) — exponentieller Charakter der Explosion (log_std
+wächst näherungsweise linear pro Update, std=exp(log_std) daher exponentiell) jetzt mit
+granularen Zwischenwerten belegt, nicht nur an TensorBoard-Endpunkten wie in früheren Logs.
+learning_rate bleibt in diesem gesamten Bereich (Step 120-54.000, weit vor dem ersten
+Curriculum-Wechsel bei 100k) stabil bei ~1.7-2.6e-05 — der KLAdaptiveLR-Scheduler trägt die
+Eskalation hier NOCH NICHT bei (anders als in den in Log 07-14 dokumentierten späteren
+Runs) — reiner, ungebremster Entropy-Bonus-Effekt. log_std_min/mean/max wachsen über alle
+18 Gelenke gleichmäßig (Spanne wächst von 0.0033 auf 0.0136 in log_std) — kein
+gelenkspezifisches Muster, spricht für einen global wirkenden Mechanismus statt einer
+einzelnen problematischen Gelenk-/Reward-Interaktion.
+
+GEGENMASSNAHMEN VORGESCHLAGEN (priorisiert):
+  1. entropy_loss_scale reduzieren (0.01 -> z.B. 0.005 oder 0.002-0.003) — geringstes Risiko,
+     linearer Hebel auf die Wachstumsrate.
+  2. max_log_std senken (2.0 -> z.B. 0.0) — harte Grenze, behebt nicht die Ursache.
+  3. clip_actions: True setzen — adressiert die eigentliche strukturelle Ursache (skrl
+     berechnet Entropie/Log-Prob aktuell auf der UNGECLIPPTEN Verteilung, obwohl die Env
+     später hart auf [-1,1] klemmt; ohne diesen Fix hat der Entropy-Bonus keinen Gegendruck,
+     der σ über den Punkt hinaus bremst, an dem zusätzliche Streuung real wirkungslos wird).
+  Empfehlung: zuerst NUR clip_actions:True testen (adressiert Ursache direkt, keine
+  Tuning-Wertentscheidung nötig), aktuellen Lauf als Baseline für A/B-Vergleich behalten.
+
+
+--------------------------------------------------------------------------------
+14. FIX UMGESETZT (VOM USER SELBST): clip_actions: True IN skrl_ppo_cfg.yaml
+--------------------------------------------------------------------------------
+
+User hat den unter Punkt 13 empfohlenen Fix direkt selbst in
+source/.../agents/skrl_ppo_cfg.yaml umgesetzt: models.policy.clip_actions von False auf True
+gesetzt (Zeile 7). Verifiziert: NUR dieses eine Feld geändert, entropy_loss_scale (weiterhin
+0.01) und max_log_std (weiterhin 2.0) UNVERÄNDERT — exakt der minimal-invasive erste Schritt
+aus der Empfehlung, nicht mehrere Stellschrauben gleichzeitig.
+
+NÄCHSTER SCHRITT (noch nicht durchgeführt): neuen Trainingslauf mit dieser Änderung fahren und
+std_debug.txt gegen den Baseline-Lauf aus Punkt 13 vergleichen — Erwartung: log_std sollte
+jetzt langsamer wachsen bzw. sich bei einem niedrigeren Wert stabilisieren, da der
+Entropy-Gradient jetzt auf der tatsächlich wirksamen (geclippten) Verteilung berechnet wird.
+
+
+--------------------------------------------------------------------------------
+15. GEÄNDERTE DATEIEN DIESER SESSION (Fortsetzung, zusätzlich zu Punkt 8 oben)
+--------------------------------------------------------------------------------
+
+Geändert:
+  source/.../phantomx_thesis_env_cfg.py
+    -> EventCfg.physics_material: static_friction_range/dynamic_friction_range an reale
+       PLA-auf-Holz-Werte angepasst (Punkt 10)
+  source/.../phantomx_thesis_env.py
+    -> Per-Term-Reward-Debug-Print (alle 100 Steps) komplett entfernt (Punkt 12)
+  scripts/skrl/train.py
+    -> _attach_std_debug_hook(): neue Hilfsfunktion, Monkey-Patch um agent.update() für PPO,
+       schreibt log_std_parameter/entropy_loss/learning_rate alle 10 Updates in
+       experiment_dir/std_debug.txt statt Terminal (Punkt 12); Aufruf vor runner.run()
+       ergänzt (nur bei algorithm=="ppo")
+  source/.../agents/skrl_ppo_cfg.yaml
+    -> models.policy.clip_actions: False -> True (Punkt 14, vom User selbst gesetzt)
+
+Neu (nur Scratchpad, kein Projekt-Artefakt):
+  sim_domainrand_curriculum_section.tex — Thesis-Abschnitte Simulation/Domain
+                                           Randomization/Curriculum (Punkt 9)
+
+Neu (Trainings-Artefakt, während der Session entstanden):
+  scripts/skrl/logs/skrl/phantomx_ppo/2026-07-22_10-03-15_ppo_torch/std_debug.txt
+    -> erster Lauf mit dem neuen Debug-Hook, analysiert in Punkt 13, lief mit
+       clip_actions:False (Baseline VOR dem Fix aus Punkt 14)
+
+
+--------------------------------------------------------------------------------
+16. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. clip_actions:True (Punkt 14) durch einen neuen Trainingslauf verifizieren — std_debug.txt
+   des neuen Laufs gegen den Baseline-Lauf 2026-07-22_10-03-15_ppo_torch vergleichen. Prüf-
+   kriterium: langsameres/gebremstes Wachstum von log_std_mean, insbesondere ob der in Punkt 13
+   beobachtete Beschleunigungseffekt (exponentiell wachsende Rate) ausbleibt oder gedämpft ist.
+2. Falls clip_actions:True allein nicht ausreicht: entropy_loss_scale (0.01 -> 0.005 oder
+   niedriger) als zweiten, unabhängigen Schritt testen (Punkt 13, Gegenmaßnahme 1) — NICHT
+   gleichzeitig mit Punkt 1 einführen, um die Wirkung einzeln zuordnen zu können.
+3. Reibungs-Fix aus Punkt 10 ebenfalls durch einen frischen Trainingslauf verifizieren
+   (Empfehlung: kein Resume eines alten Checkpoints, siehe dortiger Hinweis).
+4. target_base_height/Height-Kernel-Mismatch (aus vorherigem Session-Teil, weiterhin offen) —
+   reale Standhöhe empirisch bestätigen, danach target_base_height UND den hartcodierten
+   Kernel-Divisor (0.02) gemeinsam neu kalibrieren.
+5. Externe Reward-Konflikt-Analyse (aus vorherigem Session-Teil) bleibt in der Herkunft der
+   [32,32]-Werte ungeklärt — Angebot zur Korrektur steht weiterhin.
+6. Alle aus Log 07-20 bereits offenen Punkte bleiben unverändert offen (Strafing/Kurven-Plan
    nicht umgesetzt, Live-Steuerungsskript nicht gebaut, kein Git-Commit über den weiterhin
-   wachsenden uncommitteten Stand).
+   wachsenden uncommitteten Stand — mit den heutigen Änderungen an env.py/env_cfg.py/
+   skrl_ppo_cfg.yaml/train.py weiter gewachsen).
 
 ================================================================================

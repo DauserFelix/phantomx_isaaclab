@@ -105,8 +105,12 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.7, 1.0),
-            "dynamic_friction_range": (0.5, 0.8),
+            # War (0.7,1.0)/(0.5,0.8) — kombiniert mit Boden-mu=1.0 (multiply) ergab das
+            # effektiv 0.7-1.0 statisch, deutlich hoeher als reale PLA-Fuesse auf Holzboden
+            # (~0.2-0.45 laut Materialpaarung). Angepasst an die reale Hardware (PLA-3D-Druck
+            # auf Holzboden), um den Reibungs-bedingten Sim-to-Real-Gap zu verkleinern.
+            "static_friction_range": (0.25, 0.45),
+            "dynamic_friction_range": (0.2, 0.35),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -242,7 +246,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.08    # MP_BODY at normal standing height (~20cm above ground)
+    target_base_height = 0.11    # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
     movement_speed_x = 0.075     # 7.5 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.075 m/s)
     yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
 
@@ -283,7 +287,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # (das war die eigentliche Ursache der früheren Q-Divergenz, nicht der Scale-Wert selbst).
     # Für PPO und SAC bewusst gleich — kein separater SAC-Override mehr, um genau das
     # "stille Überschreiben"-Bugmuster von vorhin nicht zu wiederholen.
-    joint_accel_reward_scale = -3.0e-7    #2.5e-7 hat ok funktioniert
+    joint_accel_reward_scale = 0.0   #2.5e-7 hat ok funktioniert
     joint_accel_clamp: float = 5.0e7    # Deckel auf sum(joint_acc²) VOR der Skalierung —
                                           # Startwert, via Episode_Reward/dof_acc_l2 beobachten.
                                           # Nach action_scale 0.5→0.75 (1.5x größere mögliche
@@ -313,7 +317,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
-    termination_height = 0.05    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
+    termination_height = 0.00    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
     termination_tilt = 0.03     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
 
 
@@ -350,7 +354,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.04
+    target_base_height = 0.11
     movement_speed_x = 0.075
     yaw_rotation_speed_x = 0.0
 
@@ -359,7 +363,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     # (siehe dortige Kommentare). Ein separater, stiller Override war zuvor die Ursache eines
     # eigenen Bugs (Config-Änderung an der Basis griff für SAC nicht).
 
-    termination_height = 0.01
+    termination_height = 0.000
 
     # lin_vel_kernel_width nochmal deutlich verengt (0.1 → 0.005): bei movement_speed_x=0.05 gab
     # 0.1 komplettem Stillstand (error=command=0.05) noch exp(-0.05²/0.1)=exp(-0.025)≈0,975 —

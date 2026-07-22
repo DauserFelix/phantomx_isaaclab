@@ -153,6 +153,55 @@ else:
     algorithm = agent_cfg_entry_point.split("_cfg")[0].split("skrl_")[-1].lower()
 
 
+def _attach_std_debug_hook(agent) -> None:
+    """Wraps agent.update() to record, after every PPO update, exactly the quantities that
+    drive the Gaussian policy's log_std_parameter (see skrl ppo.py:397-474): the parameter
+    itself (per joint), the entropy loss, and the scheduler's resulting learning rate.
+    log_std_parameter is a single global, state-independent nn.Parameter for PPO (skrl
+    model_instantiators/torch/shared.py) -- it never sees the observation, so there is nothing
+    meaningful to log "as seen by std" beyond its own value and the loss terms that produce
+    its gradient. Purely additive/diagnostic: does not change training behavior. Written to
+    std_debug.txt next to the checkpoints/ directory (agent.experiment_dir) instead of stdout,
+    so it doesn't clutter the terminal during long training runs.
+    """
+    import os
+    import torch
+
+    original_update = agent.update
+    log_path = os.path.join(agent.experiment_dir, "std_debug.txt")
+
+    def update_with_debug_print(*, timestep: int, timesteps: int):
+        original_update(timestep=timestep, timesteps=timesteps)
+
+        if (timestep + 1) % 10 != 0:
+            return
+
+        with torch.no_grad():
+            log_std = agent.policy.log_std_parameter.detach()
+            std = log_std.exp()
+
+        entropy_loss = agent.tracking_data.get("Loss / Entropy loss", [None])[-1]
+        std_mean_logged = agent.tracking_data.get("Policy / Standard deviation", [None])[-1]
+        lr = agent.tracking_data.get("Learning / Learning rate", [None])[-1]
+
+        os.makedirs(agent.experiment_dir, exist_ok=True)
+        write_header = not os.path.isfile(log_path)
+        with open(log_path, "a") as f:
+            if write_header:
+                f.write(
+                    "step\tlog_std_min\tlog_std_mean\tlog_std_max\tstd_min\tstd_mean\tstd_max\t"
+                    "entropy_loss\tlearning_rate\ttensorboard_std_mean\n"
+                )
+            f.write(
+                f"{timestep+1}\t"
+                f"{log_std.min().item():.6f}\t{log_std.mean().item():.6f}\t{log_std.max().item():.6f}\t"
+                f"{std.min().item():.6f}\t{std.mean().item():.6f}\t{std.max().item():.6f}\t"
+                f"{entropy_loss}\t{lr}\t{std_mean_logged}\n"
+            )
+
+    agent.update = update_with_debug_print
+
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with skrl agent."""
@@ -402,6 +451,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] Loading model checkpoint from: {resume_path}")
             print(f"[INFO] Velocity curriculum resumed at step: {resume_step_msg}")
             runner.agent.load(resume_path)
+
+        if algorithm == "ppo":
+            _attach_std_debug_hook(runner.agent)
 
         runner.run()
 
