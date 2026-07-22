@@ -1,0 +1,171 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-20
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-16_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. VOLLSTÄNDIGES STUDIUM ALLER BISHERIGEN SESSION-LOGS (07-01 bis 07-16)
+--------------------------------------------------------------------------------
+
+Auftrag: alle .txt-Logs in logs/ ausführlich für die Historie studieren. Alle 6 bisherigen
+Logs (2026-07-01, 07-09, 07-11, 07-12, 07-14, 07-16) vollständig gelesen, keine Code-Änderung,
+reine Aufnahme des aktuellen Wissensstands. Zusätzlich logs/merge_files/ und logs/skrl/
+gesichtet (Referenzdateien aus dem 07-11-Merge bzw. ein TensorBoard-Run-Ordner
+"phantomx_ppo" — keine weiteren .txt-Inhalte, nichts Neues daraus zu übernehmen).
+
+Dem User eine kompakte Zusammenfassung des roten Fadens über alle 6 Sessions gegeben
+(PPO-Std-Explosion seit 07-09 wiederkehrend, SAC-Bugfixes 07-09 bis 07-12, Terrain-Fix 07-16,
+kein Git-Commit über den gesamten uncommitteten Stand seit 07-11).
+
+
+--------------------------------------------------------------------------------
+2. ERKLÄRUNG: WIE FUNKTIONIERT COMMAND-FOLLOWING / LIVE-STEUERUNG PER TASTATUR
+--------------------------------------------------------------------------------
+
+User-Frage: wie könnte der Roboter lernen, auf Befehle zu hören (z.B. Pfeiltasten-Steuerung
+im Terminal, oder eine vorgegebene Trajektorie) — und ob dafür ein bestehendes Modell
+weitertrainiert oder komplett neu trainiert werden müsste.
+
+Verifiziert gegen aktuellen Code (phantomx_thesis_env.py): self._commands ([num_envs, 3] =
+[vx, vy, yaw_rate]) ist Teil der Observation (Index 9-11 von 66) und wird AUSSCHLIESSLICH in
+_apply_velocity_curriculum() geschrieben (aufgerufen aus _reset_idx(), also nur bei Episode-
+Reset, nicht pro Step) — _pre_physics_step()/_get_observations() lesen es nur.
+
+BEANTWORTET: Command-Following ist kein neues Feature — es ist exakt das Verhalten, das seit
+Session 07-01 trainiert wird (Curriculum befüllt _commands nur mit pseudozufälligen Werten
+während des Trainings, damit die Policy lernt, auf BELIEBIGE Werte in diesem Bereich zu
+reagieren). Für Live-Steuerung reicht ein neues Skript (Erweiterung von play.py), das bei
+jedem Step env.unwrapped._commands direkt aus Tastatureingaben setzt, anstatt es dem
+Curriculum-Code zu überlassen. KEIN Neu- oder Weitertraining nötig, solange die gewünschten
+Geschwindigkeiten/Yaw-Raten innerhalb des bereits trainierten Bereichs liegen (PPO:
+vx≈0.075 m/s, yaw≈±0.2 rad/s je nach Cfg-Stand). Werte außerhalb der Trainingsverteilung
+(z.B. 0.5 m/s "weil schneller") würden voraussichtlich zu Extrapolation/Torkeln führen, nicht
+zu saubererem Gehen. Reine Vorwärts-/Yaw-Steuerung im bekannten Bereich: bestehender Checkpoint
+reicht unverändert. Echtes Nachtrainieren wäre nur nötig für Bereiche außerhalb des bisher
+Trainierten (z.B. vy≠0/Seitwärtsgehen, siehe Punkt 3).
+
+
+--------------------------------------------------------------------------------
+3. PLAN (NICHT UMGESETZT): SEITWÄRTSBEWEGUNG + KURVENLAUFEN TRAINIEREN, PPO, FLAT-TERRAIN
+--------------------------------------------------------------------------------
+
+Auftrag: prüfen, ob/wie Seitwärtsbewegung (vy≠0, Strafing) und Kurvenlaufen (kombiniertes
+vx+yaw_rate) trainierbar sind, und wie aufwendig das ist. Über Plan-Mode bearbeitet (2 parallele
+Explore/Plan-Agenten + eigene Verifikation gegen aktuellen Code), Ergebnis in einem Plan-File
+festgehalten, AUSDRÜCKLICH NICHT UMGESETZT (User-Vorgabe: "speichere den Plan in der Historie
+ab, aber führe ihn NICHT durch").
+
+RECHERCHE-BEFUND (Explore-Agent, gegen phantomx_thesis_env.py verifiziert):
+  - track_lin_vel_xy_exp (Zeile ~222-226) ist BEREITS vektoriell über commands[:, :2] gebaut —
+    kein Formel-Redesign nötig, um vy zu belohnen. vy ist aktuell nur immer 0.
+  - track_ang_vel_z_exp (Zeile ~228-232) ist unabhängig von vx — Kurvenlaufen (vx+yaw
+    gleichzeitig) ist reward-technisch bereits möglich.
+  - _apply_velocity_curriculum() ist der EINZIGE Ort, der self._commands beschreibt. PPO-Zweig
+    setzt yaw_rate ab Step 350k bereits strukturell (uniform_(-max_yaw, max_yaw)), nur
+    yaw_rotation_speed_x steht aktuell auf 0.0 → Kurvenlaufen ist im Kern nur eine
+    Cfg-Wert-Änderung, kein neuer Code-Pfad.
+  - _compute_movement_penalty() arbeitet ausschließlich mit der x-Komponente (forward_speed),
+    vy fließt dort nicht ein.
+  - tripod_gait-Reward ist rein kontaktbasiert (welcher Fuß hat Bodenkontakt), nicht
+    trajektorien-/schrittlängenbasiert — sollte asymmetrische Kurven-Schrittlängen nicht
+    strukturell blockieren.
+  - Historischer Fund: ein alter Plan sah mal "≥400k: full ±vx, vy, yaw bis 1.0 m/s" vor
+    (Log 2026-07-01), wurde nie umgesetzt — vy war also konzeptionell schon mal vorgesehen.
+
+PLAN-AGENT-EMPFEHLUNG (Kernpunkte):
+  - Kurvenlaufen: minimal-invasiv (1 Cfg-Wert), Trainingsrisiko gering-mittel.
+  - Strafing: neues Cfg-Feld movement_speed_y (eigene Konstante statt Wiederverwendung von
+    movement_speed_x, da andere biomechanische Fähigkeit), neue Bootstrap-Curriculum-Phase
+    analog zum SAC-Vorwärts-Bootstrap-Trick (BOOTSTRAP_SPEED-Prinzip: erst deutlich SCHNELLER
+    als Ziel trainieren, dann auf Zielgeschwindigkeit runtertransferieren, gegen die
+    "Stillstand fast so gut wie Bewegung"-Falle bei kleinen Kommandos) — für Strafing als
+    vermutlich VERSCHÄRFTES Risiko eingeschätzt (radiale PhantomX-Beinstellung ist für
+    Seitwärtsgehen biomechanisch ungewöhnlicher als für Vorwärtsgehen).
+  - _compute_movement_penalty bewusst NICHT um vy erweitern (erste Iteration) — Bootstrap-Phase
+    soll denselben Zweck erfüllen, ohne einen zweiten redundanten Penalty-Pfad einzuziehen.
+  - Kein separater lin_vel_kernel_width für x/y (würde bestehende, fein austarierte
+    Kernel-Historie ungültig machen) — falls nötig, später eigener zusätzlicher Reward-Term
+    statt Umbau des bestehenden Kernels.
+  - Resume von bestehendem PPO-Checkpoint statt Training from scratch, über den bereits
+    vorhandenen --resume_step/set_curriculum_step()-Mechanismus (PPO ist on-policy, kein
+    Replay-Buffer-Zustand zu beachten anders als bei SAC).
+
+USER-ENTSCHEIDUNGEN (per AskUserQuestion):
+  - Umfang: BEIDES zusammen (Kurve + Strafing) in einer Iteration, nicht nacheinander.
+  - Algorithmus: NUR PPO (nicht SAC, nicht beide).
+  - Terrain: FLAT statt Rough (nachträglich vom User korrigiert) — Begründung im Plan: neue
+    Bewegungsarten sind schon für sich ein unsicherer Lernfortschritt, zusätzliche
+    Terrain-Schwierigkeit würde die Fehlerdiagnose vermischen, falls das Training nicht wie
+    erwartet läuft. Rough-Terrain-Transfer als separater, späterer Schritt vorgesehen.
+
+FINALER PLAN-INHALT (Kurzfassung, vollständig in der Plan-Datei):
+  - Neue Cfg-Felder auf PhantomxThesisEnvCfg (PPO-Basisklasse, vererbt an
+    PhantomxThesisFlatEnvCfg): movement_speed_y=0.03, strafe_bootstrap_speed_y=0.09,
+    strafe_curriculum_start=500_000, strafe_target_start=700_000, strafe_env_fraction=0.3.
+  - yaw_rotation_speed_x: 0.0 → 0.2 (Wert aus bereits vorhandenem Kommentar übernommen).
+  - _apply_velocity_curriculum(): bestehende Phasen (< 100k, 100k-350k) UNVERÄNDERT, neue
+    Phasen HINTEN angehängt: ≥350k Kurvenlaufen (nur Cfg-Aktivierung, kein neuer Code), ≥500k
+    Bootstrap-Strafing für einen zufälligen Env-Anteil (übrige Envs bleiben beim
+    Vorwärts-/Kurven-Training, um Catastrophic Forgetting zu vermeiden), ≥700k Transfer auf
+    movement_speed_y als Zielwert, symmetrisches ±-Vorzeichen für vy.
+  - Neuer Beobachtungs-Accumulator Metrics/avg_lateral_speed_mps (analog avg_forward_speed_mps),
+    rein additiv, kein Reward-Einfluss.
+  - Explizit NICHT geändert: skrl_ppo_cfg.yaml, alle *_reward_scale-Werte,
+    lin_vel_kernel_width/ang_vel_kernel_width, movement_speed_x, _compute_movement_penalty,
+    tripod_gait-Logik, SAC-Cfg-Klassen, Task-Registrierung.
+  - Trainingsstart: Resume über Flat-Task-ID mit --resume_step ≥ 500_000.
+
+STATUS: Plan-Datei liegt unter
+/root/.claude/plans/k-nnen-wir-seitwertsbewegungen-trainiere-calm-church.md — NICHT
+ausgeführt, keine einzige Code-Datei im Projekt in diesem Zusammenhang verändert. Umsetzung
+ist ein offener Punkt für eine künftige Session (siehe Punkt 5).
+
+
+--------------------------------------------------------------------------------
+4. LATEX-DOKUMENTATION DER REWARD-STRUKTUR FÜR DIE THESIS (Fine Tuning and Weight Selection)
+--------------------------------------------------------------------------------
+
+Auftrag: alle Reward-/Penalty-Terme aus phantomx_thesis_env.py/_env_cfg.py für die schriftliche
+Arbeit dokumentieren. Iterativ über 3 Anfragen entwickelt:
+  1. Erste Gruppierung: "Essentielle Funktion" / "Optische Ergänzung" / "Sonstiges" — als
+     LaTeX-itemize mit Werten aus der aktuellen Cfg erstellt.
+  2. Neu gruppiert auf Wunsch nach: "Direkte Anforderung an das System" / "Sim-to-Sim /
+     Sim-to-Real-Gap-Minderung" / "Design-Parameter (Hexapod-Gait-Pattern)" — dieselben 14
+     Reward-Terme (track_lin_vel_xy_exp, track_ang_vel_z_exp, height_tracking,
+     movement_penalty, alive, flat_orientation_l2, action_rate_l2, dof_acc_l2, dof_torques_l2,
+     lin_vel_z_l2, ang_vel_xy_l2, foot_contact, tripod_gait, lazy_legs) neu zugeordnet.
+  3. Vollständiger Thesis-Abschnitt "Fine Tuning and Weight Selection" ausformuliert: Intro-
+     Absatz zu den 3 Klassen, itemize-Liste mit Werten (wie in Punkt 2, mit
+     flat_orientation_l2 auf User-Bestätigung in "Direkte Anforderung" statt
+     "Sim-to-Real-Minderung"), danach je Klasse eine Prosa-Beschreibung JEDES Terms mit
+     exakter Formel (LaTeX-Formeln aus dem echten Code hergeleitet, z.B.
+     track_lin_vel_xy_exp als exp(-((vx_cmd-vx)²+(vy_cmd-vy)²)/σ), tripod_gait als
+     |n_A - n_B|/3) und Begründung, warum der Term in seiner Kategorie gebraucht wird.
+     Deutschsprachig, englische Fachbegriffe (Tracking, Overshoot, Clamp, Deficit) auf Englisch
+     belassen. Abschlussabsatz zum manuellen Tuning-Vorgehen (TensorBoard-Analyse bestehender
+     Modelle) unverändert aus der User-Vorlage übernommen.
+
+Ergebnis nur als Chat-Antwort/Scratchpad-Datei geliefert (/tmp/.../scratchpad/
+fine_tuning_section.tex), NICHT ins Projekt-Repository geschrieben — reines Thesis-Schreib-
+Hilfsmittel, kein Code-Artefakt dieser Session.
+
+
+--------------------------------------------------------------------------------
+5. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. Umsetzung des Strafing+Kurvenlaufen-Plans (Punkt 3) — aktuell nur geplant, keine einzige
+   Zeile Code geändert. Bei Umsetzung: neue Cfg-Felder auf PhantomxThesisEnvCfg,
+   _apply_velocity_curriculum()-Erweiterung, neuer Metrics/avg_lateral_speed_mps-Accumulator.
+2. Live-Steuerungsskript (Punkt 2) — Idee besprochen, aber noch nicht gebaut. Falls gewünscht:
+   Erweiterung von play.py, die env.unwrapped._commands aus Tastatureingaben statt Curriculum
+   setzt (kein Trainingscode nötig für den bereits trainierten Geschwindigkeitsbereich).
+3. Alle aus Log 07-16 bereits offenen Punkte bleiben unverändert offen (kein GPU-Smoke-Test in
+   dieser Sandbox möglich, Reward-Design "große Schritte statt Zittern" weiterhin
+   User-Entscheidung ausständig, Gazebo-Action-Smoothing beim anderen Docker-Agenten
+   nachzuverfolgen, kein Git-Commit über den weiterhin wachsenden uncommitteten Stand).
+
+================================================================================

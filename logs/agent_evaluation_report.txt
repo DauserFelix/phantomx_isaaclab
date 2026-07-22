@@ -1,0 +1,1678 @@
+====================================================================================================
+AGENT-EVALUATION REPORT — phantomx_thesis (SKRL PPO + SAC)
+Erstellt am 2026-07-22 nach Bereinigung der Run-Verzeichnisse (logs/skrl/phantomx_ppo, logs/skrl/phantomx_sac)
+Loeschregel angewendet: Runs OHNE Checkpoint ODER mit maximalem Checkpoint <= 100.000 Schritten wurden entfernt (44 von urspruenglich 78 Runs).
+Verbleibend: 26 PPO-Runs, 9 SAC-Runs.
+====================================================================================================
+
+Bewertungsskala 0-10 (Heuristik, siehe Begruendung je Agent):
+  0-2  : Training gescheitert/divergiert oder extrem unvollstaendig, kein brauchbares Verhalten
+  3-4  : Deutliche Schwaechen (z.B. kaum Bewegung, Instabilitaet, frueher Abbruch)
+  5-6  : Funktionsfaehig mit erkennbaren Einschraenkungen
+  7-8  : Gutes, stabiles Trainingsergebnis, kleinere Abstriche
+  9-10 : Sehr gutes, vollstaendiges und stabiles Trainingsergebnis
+
+Basis der Bewertung: TensorBoard-Endwerte (Mittel der letzten 5 Log-Punkte je Metrik), abgeglichen mit den in den bisherigen Session-Logs dokumentierten bekannten Fehlermustern (Policy-Std-Explosion bei PPO, Q-Wert-Divergenz/Entropie-Kollaps bei SAC, 'Steht-statt-Geht'-Symptom). Automatisiert erzeugt -- keine visuelle/Sim-Inspektion moeglich in dieser Sandbox (kein funktionierendes CUDA), Bewertung stuetzt sich ausschliesslich auf geloggte Skalare.
+
+####################################################################################################
+# PPO-AGENTEN (26)
+####################################################################################################
+
+====================================================================================================
+[PPO #1] 2026-06-09_18-35-39_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 1000000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 200
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : 0.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.001  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 96 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.005
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.1 / 0.03
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : -0.0435
+  Policy / Standard deviation                  : 0.9228
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : nicht geloggt
+  Episode_Reward/foot_contact                  : nicht geloggt
+  Episode / Total timesteps (mean)             : 1.4556
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 3.0 / 10
+  - Lauf vollstaendig bis Trainingsende (1000000/1000000 Schritte).
+  - Policy-Standardabweichung am Ende: 0.923 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende NEGATIV (-0.044), Peak war -0.028 -- Policy hat sich waehrend des Trainings verschlechtert.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+
+====================================================================================================
+[PPO #2] 2026-06-10_15-28-10_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 1000000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : 0.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.001  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 128 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.005
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.1 / 0.5
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : -5.6245
+  Policy / Standard deviation                  : 3.0979
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : nicht geloggt
+  Episode_Reward/foot_contact                  : nicht geloggt
+  Episode / Total timesteps (mean)             : 18.1870
+  Episode / Total timesteps (min)              : 16.0000
+
+BEWERTUNG: 3.5 / 10
+  - Lauf vollstaendig bis Trainingsende (1000000/1000000 Schritte).
+  - Policy-Standardabweichung am Ende: 3.098 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende NEGATIV (-5.624), Peak war -5.520 -- Policy hat sich waehrend des Trainings verschlechtert.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+
+====================================================================================================
+[PPO #3] 2026-06-10_22-47-09_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 1000000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : 0.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.001  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 128 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.005
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.1 / 0.5
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 15.2417
+  Policy / Standard deviation                  : 5.3241
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : nicht geloggt
+  Episode_Reward/foot_contact                  : nicht geloggt
+  Episode / Total timesteps (mean)             : 27.8107
+  Episode / Total timesteps (min)              : 16.0000
+
+BEWERTUNG: 6.0 / 10
+  - Lauf vollstaendig bis Trainingsende (1000000/1000000 Schritte).
+  - Policy-Standardabweichung am Ende: 5.324 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 15.242 (Peak 20.312) -- stabil bis wachsend.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+
+====================================================================================================
+[PPO #4] 2026-06-12_09-15-42_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.1 / 0.5
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 6.2830
+  Policy / Standard deviation                  : 1.8324
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : nicht geloggt
+  Episode_Reward/foot_contact                  : nicht geloggt
+  Episode / Total timesteps (mean)             : 51.0062
+  Episode / Total timesteps (min)              : 51.0000
+
+BEWERTUNG: 4.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 1.832 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) faellt am Ende auf 6.283, deutlich unter Peak 12.779 -- Trainingsinstabilitaet/Regression.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+
+====================================================================================================
+[PPO #5] 2026-06-15_13-21-46_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.1 / 0.5
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 6.4395
+  Policy / Standard deviation                  : 1.7621
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : nicht geloggt
+  Episode_Reward/foot_contact                  : nicht geloggt
+  Episode / Total timesteps (mean)             : 51.0638
+  Episode / Total timesteps (min)              : 51.0000
+
+BEWERTUNG: 4.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 1.762 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) faellt am Ende auf 6.439, deutlich unter Peak 12.910 -- Trainingsinstabilitaet/Regression.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+
+====================================================================================================
+[PPO #6] 2026-06-19_10-21-03_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 960000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000, 720000, 840000, 960000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : 0.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.001  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.2 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 259.9842
+  Policy / Standard deviation                  : 1.3279
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.1215
+  Episode_Reward/foot_contact                  : 0.6467
+  Episode / Total timesteps (mean)             : 1515.3438
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 4.0 / 10
+  - Lauf nur zu 96% des geplanten Trainings abgeschlossen (960000/1000000).
+  - Policy-Standardabweichung am Ende: 1.328 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) faellt am Ende auf 259.984, deutlich unter Peak 799.685 -- Trainingsinstabilitaet/Regression.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.1215.
+
+====================================================================================================
+[PPO #7] 2026-07-10_22-19-15_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.2 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 563.8466
+  Policy / Standard deviation                  : 0.8509
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.6820
+  Episode_Reward/foot_contact                  : 0.9196
+  Episode / Total timesteps (mean)             : 1910.5102
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 0.851 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 563.847 (Peak 763.662) -- stabil bis wachsend.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.6820.
+
+====================================================================================================
+[PPO #8] 2026-07-11_13-26-47_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.07 / 0.2
+  target_base_height / termination_height : 0.2 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 757.1464
+  Policy / Standard deviation                  : 0.9077
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.7833
+  Episode_Reward/foot_contact                  : 0.9423
+  Episode / Total timesteps (mean)             : 1912.6465
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 0.908 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 757.146 (Peak 783.354) -- stabil bis wachsend.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.7833.
+
+====================================================================================================
+[PPO #9] 2026-07-11_16-33-21_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.07 / 0.2
+  target_base_height / termination_height : 0.15 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : False / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 748.2926
+  Policy / Standard deviation                  : 1.1410
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.6665
+  Episode_Reward/foot_contact                  : 0.8700
+  Episode / Total timesteps (mean)             : 1939.3181
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 1.141 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 748.293 (Peak 754.499) -- stabil bis wachsend.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.6665.
+
+====================================================================================================
+[PPO #10] 2026-07-11_21-38-52_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 360000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.07 / 0.0
+  target_base_height / termination_height : 0.08 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : False / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 601.0896
+  Policy / Standard deviation                  : 1.3994
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.3810
+  Episode_Reward/foot_contact                  : 0.8665
+  Episode / Total timesteps (mean)             : 1773.1143
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.0 / 10
+  - Lauf nur zu 60% des geplanten Trainings abgeschlossen (360000/600000).
+  - Policy-Standardabweichung am Ende: 1.399 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 601.090 (Peak 631.671) -- stabil bis wachsend.
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand ohne diese Metrik) -- Bewegungsqualitaet nicht direkt messbar, nur ueber Reward-Proxy.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.3810.
+
+====================================================================================================
+[PPO #11] 2026-07-12_20-24-38_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.1 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : False / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 391.3541
+  Policy / Standard deviation                  : 2.2126
+  Metrics/avg_forward_speed_mps                : 0.1166
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 0.7270
+  Episode_Reward/foot_contact                  : 0.8715
+  Episode / Total timesteps (mean)             : 1830.5613
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 2.213 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 391.354 (Peak 608.380) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1166 m/s vs Kommando 0.0750 m/s (Verhaeltnis 1.55).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 0.7270.
+
+====================================================================================================
+[PPO #12] 2026-07-13_01-22-20_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.1 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : False / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 492.8063
+  Policy / Standard deviation                  : 1.5329
+  Metrics/avg_forward_speed_mps                : 0.1152
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.2367
+  Episode_Reward/foot_contact                  : 0.9696
+  Episode / Total timesteps (mean)             : 1959.5143
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 1.533 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 492.806 (Peak 634.360) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1152 m/s vs Kommando 0.0750 m/s (Verhaeltnis 1.54).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.2367.
+
+====================================================================================================
+[PPO #13] 2026-07-13_10-46-08_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.13 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : False / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 591.2154
+  Policy / Standard deviation                  : 1.4863
+  Metrics/avg_forward_speed_mps                : 0.1101
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.3782
+  Episode_Reward/foot_contact                  : 0.9565
+  Episode / Total timesteps (mean)             : 1944.3732
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 1.486 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 591.215 (Peak 631.710) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1101 m/s vs Kommando 0.0750 m/s (Verhaeltnis 1.47).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.3782.
+
+====================================================================================================
+[PPO #14] 2026-07-13_16-52-27_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 360000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.13 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : False / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 553.3953
+  Policy / Standard deviation                  : 1.5308
+  Metrics/avg_forward_speed_mps                : 0.1307
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 0.8851
+  Episode_Reward/foot_contact                  : 0.8919
+  Episode / Total timesteps (mean)             : 1793.3281
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.0 / 10
+  - Lauf nur zu 60% des geplanten Trainings abgeschlossen (360000/600000).
+  - Policy-Standardabweichung am Ende: 1.531 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 553.395 (Peak 558.803) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1307 m/s vs Kommando 0.0750 m/s (Verhaeltnis 1.74).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 0.8851.
+
+====================================================================================================
+[PPO #15] 2026-07-13_20-08-42_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 240000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 775.6840
+  Policy / Standard deviation                  : 3.8331
+  Metrics/avg_forward_speed_mps                : 0.0824
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.8249
+  Episode_Reward/foot_contact                  : 0.9566
+  Episode / Total timesteps (mean)             : 1934.2544
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.0 / 10
+  - Lauf nur zu 40% des geplanten Trainings abgeschlossen (240000/600000).
+  - Policy-Standardabweichung am Ende: 3.833 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 775.684 (Peak 779.751) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0824 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.10).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.8249.
+
+====================================================================================================
+[PPO #16] 2026-07-14_10-17-26_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 729.4887
+  Policy / Standard deviation                  : 6.4873
+  Metrics/avg_forward_speed_mps                : 0.1100
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.3622
+  Episode_Reward/foot_contact                  : 0.9328
+  Episode / Total timesteps (mean)             : 1937.1947
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 6.487 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 729.489 (Peak 736.549) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1100 m/s vs Kommando 0.0750 m/s (Verhaeltnis 1.47).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.3622.
+
+====================================================================================================
+[PPO #17] 2026-07-14_14-42-29_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 531.7664
+  Policy / Standard deviation                  : 7.3891
+  Metrics/avg_forward_speed_mps                : -0.0028
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.6804
+  Episode_Reward/foot_contact                  : 0.8733
+  Episode / Total timesteps (mean)             : 1749.0832
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 0.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung haengt am Deckel exp(max_log_std)=7.389 (Endwert 7.389) -- klassisches Explosions-/Rauschsymptom, deterministisches Verhalten via mean_actions bleibt trotzdem moeglich, aber Exploration ist entartet.
+  - Reward/Total reward (mean) am Ende: 531.766 (Peak 556.703) -- stabil bis wachsend.
+  - avg_forward_speed_mps=-0.0028 m/s liegt weit unter Kommando 0.0750 m/s (Verhaeltnis -0.04) -- Roboter bewegt sich kaum, 'Steht-statt-Geht'.
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.6804.
+
+====================================================================================================
+[PPO #18] 2026-07-14_19-32-18_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 548.8647
+  Policy / Standard deviation                  : 5.5726
+  Metrics/avg_forward_speed_mps                : 0.1007
+  Metrics/avg_body_height_m                    : 0.1971
+  Episode_Reward/tripod_gait                   : 1.6623
+  Episode_Reward/foot_contact                  : 0.9058
+  Episode / Total timesteps (mean)             : 1863.2318
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 6.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 5.573 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 548.865 (Peak 599.168) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1007 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.34).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.6623.
+
+====================================================================================================
+[PPO #19] 2026-07-14_22-51-11_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 1025
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 875.3666
+  Policy / Standard deviation                  : 6.1712
+  Metrics/avg_forward_speed_mps                : 0.0957
+  Metrics/avg_body_height_m                    : 0.2016
+  Episode_Reward/tripod_gait                   : 1.8932
+  Episode_Reward/foot_contact                  : 0.9711
+  Episode / Total timesteps (mean)             : 1968.9784
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 6.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 6.171 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 875.367 (Peak 888.131) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0957 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.28).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.8932.
+
+====================================================================================================
+[PPO #20] 2026-07-15_12-59-06_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 1024
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 858.3995
+  Policy / Standard deviation                  : 7.3891
+  Metrics/avg_forward_speed_mps                : 0.0992
+  Metrics/avg_body_height_m                    : 0.2004
+  Episode_Reward/tripod_gait                   : 1.7638
+  Episode_Reward/foot_contact                  : 0.9790
+  Episode / Total timesteps (mean)             : 1963.2467
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 3.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung haengt am Deckel exp(max_log_std)=7.389 (Endwert 7.389) -- klassisches Explosions-/Rauschsymptom, deterministisches Verhalten via mean_actions bleibt trotzdem moeglich, aber Exploration ist entartet.
+  - Reward/Total reward (mean) am Ende: 858.399 (Peak 863.763) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0992 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.32).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.7638.
+
+====================================================================================================
+[PPO #21] 2026-07-15_19-56-14_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 1024
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 789.4090
+  Policy / Standard deviation                  : 4.9817
+  Metrics/avg_forward_speed_mps                : 0.1076
+  Metrics/avg_body_height_m                    : 0.1879
+  Episode_Reward/tripod_gait                   : 1.7802
+  Episode_Reward/foot_contact                  : 0.9156
+  Episode / Total timesteps (mean)             : 1890.7298
+  Episode / Total timesteps (min)              : 1.0000
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 4.982 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 789.409 (Peak 827.137) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.1076 m/s vs Kommando 0.0750 m/s (Verhaeltnis 1.43).
+  - Episode/Total timesteps (min)=1.0 -- mindestens eine Env stirbt konstant sofort nach Reset (Spawn-Problem oder harte Terminierung).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.7802.
+
+====================================================================================================
+[PPO #22] 2026-07-16_10-28-23_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 1024
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 309.8552
+  Policy / Standard deviation                  : 7.3891
+  Metrics/avg_forward_speed_mps                : 0.0729
+  Metrics/avg_body_height_m                    : 0.1774
+  Episode_Reward/tripod_gait                   : 0.7370
+  Episode_Reward/foot_contact                  : 0.4703
+  Episode / Total timesteps (mean)             : 1094.1410
+  Episode / Total timesteps (min)              : 7.8000
+
+BEWERTUNG: 4.0 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung haengt am Deckel exp(max_log_std)=7.389 (Endwert 7.389) -- klassisches Explosions-/Rauschsymptom, deterministisches Verhalten via mean_actions bleibt trotzdem moeglich, aber Exploration ist entartet.
+  - Reward/Total reward (mean) am Ende: 309.855 (Peak 319.939) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0729 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 0.97).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 0.7370.
+
+====================================================================================================
+[PPO #23] 2026-07-16_15-58-52_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 72.2149
+  Policy / Standard deviation                  : 7.3891
+  Metrics/avg_forward_speed_mps                : 0.0535
+  Metrics/avg_body_height_m                    : 0.1545
+  Episode_Reward/tripod_gait                   : 0.1367
+  Episode_Reward/foot_contact                  : 0.1524
+  Episode / Total timesteps (mean)             : 340.2346
+  Episode / Total timesteps (min)              : 8.4000
+
+BEWERTUNG: 4.0 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung haengt am Deckel exp(max_log_std)=7.389 (Endwert 7.389) -- klassisches Explosions-/Rauschsymptom, deterministisches Verhalten via mean_actions bleibt trotzdem moeglich, aber Exploration ist entartet.
+  - Reward/Total reward (mean) am Ende: 72.215 (Peak 90.817) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0535 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 0.71).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 0.1367.
+
+====================================================================================================
+[PPO #24] 2026-07-20_20-48-28_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 144.7683
+  Policy / Standard deviation                  : 7.3891
+  Metrics/avg_forward_speed_mps                : 0.0455
+  Metrics/avg_body_height_m                    : 0.1900
+  Episode_Reward/tripod_gait                   : 0.2156
+  Episode_Reward/foot_contact                  : 0.2759
+  Episode / Total timesteps (mean)             : 605.8091
+  Episode / Total timesteps (min)              : 8.0000
+
+BEWERTUNG: 3.0 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung haengt am Deckel exp(max_log_std)=7.389 (Endwert 7.389) -- klassisches Explosions-/Rauschsymptom, deterministisches Verhalten via mean_actions bleibt trotzdem moeglich, aber Exploration ist entartet.
+  - Reward/Total reward (mean) am Ende: 144.768 (Peak 200.618) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0455 m/s vs Kommando 0.0750 m/s (Verhaeltnis 0.61).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 0.2156.
+
+====================================================================================================
+[PPO #25] 2026-07-21_12-16-42_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.1
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : plane
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 831.6182
+  Policy / Standard deviation                  : 5.7768
+  Metrics/avg_forward_speed_mps                : 0.0976
+  Metrics/avg_body_height_m                    : 0.1876
+  Episode_Reward/tripod_gait                   : 1.8285
+  Episode_Reward/foot_contact                  : 0.9300
+  Episode / Total timesteps (mean)             : 1945.8934
+  Episode / Total timesteps (min)              : 24.0000
+
+BEWERTUNG: 7.0 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung am Ende: 5.777 (Deckel waere 7.389) -- kein Anzeichen fuer Explosion.
+  - Reward/Total reward (mean) am Ende: 831.618 (Peak 839.221) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0976 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.30).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 1.8285.
+
+====================================================================================================
+[PPO #26] 2026-07-21_15-28-04_ppo_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [120000, 240000, 360000, 480000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 512
+
+-- Wichtigste Modell-/Trainingsparameter (PPO) --
+  Netzwerk (Policy/Value, shared)  : [256, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -2.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  lambda (GAE)                     : 0.95
+  learning_rate (initial)          : 0.0003  Scheduler=KLAdaptiveLR
+  rollouts x mini_batches          : 24 x 4 (learning_epochs=5)
+  entropy_loss_scale               : 0.01
+  ratio_clip / value_clip          : 0.2 / 0.2
+  grad_norm_clip                   : 1.0
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.08 / 0.05
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.25 / 0.25
+  strict_action_pipeline / use_sac_curriculum : True / False
+  terrain_type                             : generator
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 70.6523
+  Policy / Standard deviation                  : 7.3891
+  Metrics/avg_forward_speed_mps                : 0.0945
+  Metrics/avg_body_height_m                    : 0.1789
+  Episode_Reward/tripod_gait                   : 0.1487
+  Episode_Reward/foot_contact                  : 0.1476
+  Episode / Total timesteps (mean)             : 342.5970
+  Episode / Total timesteps (min)              : 7.8000
+
+BEWERTUNG: 4.0 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Policy-Standardabweichung haengt am Deckel exp(max_log_std)=7.389 (Endwert 7.389) -- klassisches Explosions-/Rauschsymptom, deterministisches Verhalten via mean_actions bleibt trotzdem moeglich, aber Exploration ist entartet.
+  - Reward/Total reward (mean) am Ende: 70.652 (Peak 82.233) -- stabil bis wachsend.
+  - avg_forward_speed_mps=0.0945 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.26).
+  - Episode_Reward/tripod_gait (Endwert, episodennormiert): 0.1487.
+
+####################################################################################################
+# SAC-AGENTEN (9)
+####################################################################################################
+
+====================================================================================================
+[SAC #1] 2026-06-15_21-10-32_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 300000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000] 
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : 0.0 / -20.0 / 2.0
+  discount_factor (gamma)          : 0.99
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 4096
+  learn_entropy / target_entropy   : True / None
+  grad_norm_clip                   : 0.0
+  memory: class/size/n_steps/repl. : RandomMemory / 100000 / None / None
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.1 / 0.5
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  clamp_reward / reward_clamp_value           : None / None
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : n/a
+  Q-network / Q1 (min)                         : n/a
+  Q-network / Q1 (max)                         : n/a
+  Coefficient / Entropy coefficient            : n/a
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : nicht geloggt
+  Episode_Reward/foot_contact                  : nicht geloggt
+  Episode / Total timesteps (mean)             : 1999.0000
+
+BEWERTUNG: 4.5 / 10
+  - Lauf nur zu 30% des geplanten Trainings abgeschlossen (300000/1000000).
+  - Q1 (min) am Ende bei nan -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei nan -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand) -- Bewegungsqualitaet nicht direkt messbar.
+  - Episode/Total timesteps (mean)=1999 (~100% der maximalen Episodenlaenge) -- Roboter ueberlebt durchgehend, kein haeufiges Umkippen.
+  - Critic loss am Ende: nan.
+
+====================================================================================================
+[SAC #2] 2026-07-09_11-48-54_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 1000000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [512, 256, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [512, 256, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.1 / 0.0
+  target_base_height / termination_height : 0.2 / 0.08
+  lin_vel_kernel_width / ang_vel_kernel_width : None / None
+  strict_action_pipeline / use_sac_curriculum : None / None
+  clamp_reward / reward_clamp_value           : None / None
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 366.5216
+  Q-network / Q1 (min)                         : -4.8976
+  Q-network / Q1 (max)                         : 14.7923
+  Coefficient / Entropy coefficient            : 0.0022
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 3.5921
+  Episode_Reward/foot_contact                  : 0.9504
+  Episode / Total timesteps (mean)             : 1918.1018
+
+BEWERTUNG: 6.0 / 10
+  - Lauf vollstaendig bis Trainingsende (1000000/1000000 Schritte).
+  - Q1 (min) am Ende bei -4.9 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00222 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand) -- Bewegungsqualitaet nicht direkt messbar.
+  - Episode/Total timesteps (mean)=1918 (~96% der maximalen Episodenlaenge) -- Roboter ueberlebt durchgehend, kein haeufiges Umkippen.
+  - Critic loss am Ende: 0.014.
+
+====================================================================================================
+[SAC #3] 2026-07-12_01-22-34_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 1000000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.05 / 0.0
+  target_base_height / termination_height : 0.15 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.1 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 353.8509
+  Q-network / Q1 (min)                         : -9.0898
+  Q-network / Q1 (max)                         : 14.5040
+  Coefficient / Entropy coefficient            : 0.0042
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 0.3693
+  Episode_Reward/foot_contact                  : 0.4450
+  Episode / Total timesteps (mean)             : 956.3171
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (1000000/1000000 Schritte).
+  - Q1 (min) am Ende bei -9.1 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00416 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand) -- Bewegungsqualitaet nicht direkt messbar.
+  - Critic loss am Ende: 0.180.
+
+====================================================================================================
+[SAC #4] 2026-07-12_13-06-39_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 400000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.05 / 0.0
+  target_base_height / termination_height : 0.15 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.1 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 211.8005
+  Q-network / Q1 (min)                         : -6.5677
+  Q-network / Q1 (max)                         : 13.5870
+  Coefficient / Entropy coefficient            : 0.0052
+  Metrics/avg_forward_speed_mps                : nicht geloggt
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 0.1940
+  Episode_Reward/foot_contact                  : 0.2718
+  Episode / Total timesteps (mean)             : 600.2473
+
+BEWERTUNG: 4.0 / 10
+  - Lauf nur zu 40% des geplanten Trainings abgeschlossen (400000/1000000).
+  - Q1 (min) am Ende bei -6.6 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00524 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - Metrics/avg_forward_speed_mps nicht geloggt (aelterer Codestand) -- Bewegungsqualitaet nicht direkt messbar.
+  - Critic loss am Ende: 0.243.
+
+====================================================================================================
+[SAC #5] 2026-07-12_16-12-44_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 700000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 1000000
+Verfuegbare Checkpoints                       : [100000, 200000, 300000, 400000, 500000, 600000, 700000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.1 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.005 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 777.0715
+  Q-network / Q1 (min)                         : -6.4200
+  Q-network / Q1 (max)                         : 13.0675
+  Coefficient / Entropy coefficient            : 0.0012
+  Metrics/avg_forward_speed_mps                : 0.0769
+  Metrics/avg_body_height_m                    : nicht geloggt
+  Episode_Reward/tripod_gait                   : 1.9554
+  Episode_Reward/foot_contact                  : 0.9892
+  Episode / Total timesteps (mean)             : 1980.3082
+
+BEWERTUNG: 7.0 / 10
+  - Lauf nur zu 70% des geplanten Trainings abgeschlossen (700000/1000000).
+  - Q1 (min) am Ende bei -6.4 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00121 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - avg_forward_speed_mps=0.0769 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 1.03).
+  - Episode/Total timesteps (mean)=1980 (~99% der maximalen Episodenlaenge) -- Roboter ueberlebt durchgehend, kein haeufiges Umkippen.
+  - Critic loss am Ende: 0.003.
+
+====================================================================================================
+[SAC #6] 2026-07-15_09-17-09_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [60000, 120000, 180000, 240000, 300000, 360000, 420000, 480000, 540000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.15 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.005 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 903.5583
+  Q-network / Q1 (min)                         : -8.3203
+  Q-network / Q1 (max)                         : 15.5081
+  Coefficient / Entropy coefficient            : 0.0005
+  Metrics/avg_forward_speed_mps                : 0.0736
+  Metrics/avg_body_height_m                    : 0.1905
+  Episode_Reward/tripod_gait                   : 1.9312
+  Episode_Reward/foot_contact                  : 0.9739
+  Episode / Total timesteps (mean)             : 1953.5823
+
+BEWERTUNG: 6.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Q1 (min) am Ende bei -8.3 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00049 -- praktisch kollabiert, Exploration vermutlich zu frueh erloschen.
+  - avg_forward_speed_mps=0.0736 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 0.98).
+  - Episode/Total timesteps (mean)=1954 (~98% der maximalen Episodenlaenge) -- Roboter ueberlebt durchgehend, kein haeufiges Umkippen.
+  - Critic loss am Ende: 0.003.
+
+====================================================================================================
+[SAC #7] 2026-07-15_23-37-08_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [60000, 120000, 180000, 240000, 300000, 360000, 420000, 480000, 540000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.005 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 836.4046
+  Q-network / Q1 (min)                         : -6.3344
+  Q-network / Q1 (max)                         : 14.3000
+  Coefficient / Entropy coefficient            : 0.0032
+  Metrics/avg_forward_speed_mps                : 0.0745
+  Metrics/avg_body_height_m                    : 0.1724
+  Episode_Reward/tripod_gait                   : 1.8113
+  Episode_Reward/foot_contact                  : 0.9364
+  Episode / Total timesteps (mean)             : 1947.9587
+
+BEWERTUNG: 7.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Q1 (min) am Ende bei -6.3 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00319 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - avg_forward_speed_mps=0.0745 m/s trifft Kommando 0.0750 m/s gut (Verhaeltnis 0.99).
+  - Episode/Total timesteps (mean)=1948 (~97% der maximalen Episodenlaenge) -- Roboter ueberlebt durchgehend, kein haeufiges Umkippen.
+  - Critic loss am Ende: 0.011.
+
+====================================================================================================
+[SAC #8] 2026-07-16_23-27-47_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [60000, 120000, 180000, 240000, 300000, 360000, 420000, 480000, 540000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.11 / 0.07
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.005 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 378.5891
+  Q-network / Q1 (min)                         : -5.3173
+  Q-network / Q1 (max)                         : 13.2669
+  Coefficient / Entropy coefficient            : 0.0034
+  Metrics/avg_forward_speed_mps                : 0.0413
+  Metrics/avg_body_height_m                    : 0.1645
+  Episode_Reward/tripod_gait                   : 0.6440
+  Episode_Reward/foot_contact                  : 0.4935
+  Episode / Total timesteps (mean)             : 1122.8128
+
+BEWERTUNG: 5.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Q1 (min) am Ende bei -5.3 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00341 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - avg_forward_speed_mps=0.0413 m/s vs Kommando 0.0750 m/s (Verhaeltnis 0.55).
+  - Critic loss am Ende: 0.089.
+
+====================================================================================================
+[SAC #9] 2026-07-21_22-04-49_sac_torch
+====================================================================================================
+Erreichte Iterationen (max. Checkpoint-Step) : 600000
+Geplante Gesamt-Timesteps (trainer.timesteps) : 600000
+Verfuegbare Checkpoints                       : [60000, 120000, 180000, 240000, 300000, 360000, 420000, 480000, 540000, 600000] + best_agent.pt
+Action Space                                  : 18
+Observation Space                             : 66
+num_envs                                      : 128
+
+-- Wichtigste Modell-/Trainingsparameter (SAC) --
+  Netzwerk (Actor)                 : [128, 128] , Aktivierung=elu
+  Netzwerk (Critic x4)             : [128, 128] , Aktivierung=elu
+  initial_log_std / min / max      : -1.9 / -5.0 / 2.0
+  discount_factor (gamma)          : 0.97
+  polyak (tau)                     : 0.005
+  learning_rate                    : 0.0003
+  batch_size                       : 2048
+  learn_entropy / target_entropy   : True / -9.0
+  grad_norm_clip                   : 0.5
+  memory: class/size/n_steps/repl. : NStepMemory / 125000 / 3 / True
+
+-- Wichtigste Environment-Parameter --
+  movement_speed_x / yaw_rotation_speed_x : 0.075 / 0.0
+  target_base_height / termination_height : 0.04 / 0.01
+  lin_vel_kernel_width / ang_vel_kernel_width : 0.005 / 0.1
+  strict_action_pipeline / use_sac_curriculum : True / True
+  clamp_reward / reward_clamp_value           : True / 20.0
+
+-- Endstand ausgewaehlter TensorBoard-Metriken (Mittel der letzten 5 Log-Punkte) --
+  Reward / Total reward (mean)                 : 195.0743
+  Q-network / Q1 (min)                         : -6.8813
+  Q-network / Q1 (max)                         : 10.7731
+  Coefficient / Entropy coefficient            : 0.0023
+  Metrics/avg_forward_speed_mps                : 0.0187
+  Metrics/avg_body_height_m                    : 0.1438
+  Episode_Reward/tripod_gait                   : 0.3126
+  Episode_Reward/foot_contact                  : 0.3935
+  Episode / Total timesteps (mean)             : 856.8227
+
+BEWERTUNG: 3.5 / 10
+  - Lauf vollstaendig bis Trainingsende (600000/600000 Schritte).
+  - Q1 (min) am Ende bei -6.9 -- kein extremer Ausreisser (Vergleich: historische Divergenz lag bei bis zu 2e18).
+  - Entropy coefficient (alpha) am Ende bei 0.00234 -- im gesunden Bereich (historisch beobachtetes Plateau ~0.005-0.007).
+  - avg_forward_speed_mps=0.0187 m/s liegt weit unter Kommando 0.0750 m/s (Verhaeltnis 0.25) -- Roboter bewegt sich kaum.
+  - Critic loss am Ende: 0.099.
+
+====================================================================================================
+ZUSAMMENFASSUNG — SORTIERT NACH BEWERTUNG
+====================================================================================================
+
+-- PPO --
+   7.0 / 10   2026-07-21_12-16-42_ppo_torch
+   6.5 / 10   2026-07-14_19-32-18_ppo_torch
+   6.5 / 10   2026-07-14_22-51-11_ppo_torch
+   6.0 / 10   2026-06-10_22-47-09_ppo_torch
+   5.5 / 10   2026-07-10_22-19-15_ppo_torch
+   5.5 / 10   2026-07-11_13-26-47_ppo_torch
+   5.5 / 10   2026-07-11_16-33-21_ppo_torch
+   5.5 / 10   2026-07-12_20-24-38_ppo_torch
+   5.5 / 10   2026-07-13_01-22-20_ppo_torch
+   5.5 / 10   2026-07-13_10-46-08_ppo_torch
+   5.5 / 10   2026-07-14_10-17-26_ppo_torch
+   5.5 / 10   2026-07-15_19-56-14_ppo_torch
+   5.0 / 10   2026-07-11_21-38-52_ppo_torch
+   5.0 / 10   2026-07-13_16-52-27_ppo_torch
+   5.0 / 10   2026-07-13_20-08-42_ppo_torch
+   4.5 / 10   2026-06-12_09-15-42_ppo_torch
+   4.5 / 10   2026-06-15_13-21-46_ppo_torch
+   4.0 / 10   2026-06-19_10-21-03_ppo_torch
+   4.0 / 10   2026-07-16_10-28-23_ppo_torch
+   4.0 / 10   2026-07-16_15-58-52_ppo_torch
+   4.0 / 10   2026-07-21_15-28-04_ppo_torch
+   3.5 / 10   2026-06-10_15-28-10_ppo_torch
+   3.5 / 10   2026-07-15_12-59-06_ppo_torch
+   3.0 / 10   2026-06-09_18-35-39_ppo_torch
+   3.0 / 10   2026-07-20_20-48-28_ppo_torch
+   0.5 / 10   2026-07-14_14-42-29_ppo_torch
+
+-- SAC --
+   7.5 / 10   2026-07-15_23-37-08_sac_torch
+   7.0 / 10   2026-07-12_16-12-44_sac_torch
+   6.5 / 10   2026-07-15_09-17-09_sac_torch
+   6.0 / 10   2026-07-09_11-48-54_sac_torch
+   5.5 / 10   2026-07-12_01-22-34_sac_torch
+   5.5 / 10   2026-07-16_23-27-47_sac_torch
+   4.5 / 10   2026-06-15_21-10-32_sac_torch
+   4.0 / 10   2026-07-12_13-06-39_sac_torch
+   3.5 / 10   2026-07-21_22-04-49_sac_torch
+
+====================================================================================================

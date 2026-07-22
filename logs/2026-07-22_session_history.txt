@@ -1,0 +1,248 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-22
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-20_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. LATEX-ABSCHNITT "ACTOR AND CRITIC NETWORKS" FÜR DIE THESIS
+--------------------------------------------------------------------------------
+
+Auftrag: Netzwerk-Architektur, Aktivierungen und Designentscheidungen für Actor/Critic (PPO +
+SAC) dokumentieren, mit Unterabschnitten "Actor and Critic Networks" (Struktur/Funktion beider
+Netze) und "Hidden Dimensions and Hyperparameters" (Reproduzierbarkeit).
+
+VERIFIKATION GEGEN ECHTEN CODE (nicht nur YAML geglaubt):
+  - skrl-Quellcode gelesen (utils/model_instantiators/torch/shared.py,
+    utils/runner/torch/runner.py): models.separate: False bei PPO bedeutet ECHTES Shared
+    Network — Policy und Value teilen sich EINEN Feature-Trunk [256,256,128]; bei
+    single_forward_pass=True (skrl-Default) durchläuft nur die Policy-Anfrage pro Step den
+    vollen Trunk, die Value-Anfrage im selben Step liest den zwischengespeicherten
+    self._shared_output wieder aus. Wichtiger, nicht-trivialer Fakt, extra am Source-Code
+    geprüft statt aus der Config vermutet.
+  - skrl_sac_models.py (PhysicsBoundedActor, SACCritic) gelesen: SAC nutzt vollständig
+    getrennte Netze (models.separate: True), Actor mit tanh-Squashing + physikbasierten
+    Action-Bounds (action_range=joint_pos_limit/action_scale, action_bias=0) und korrigierter
+    Log-Probability für die tanh-Change-of-Variables; konservative Gewichtsinitialisierung
+    (mean_head/log_std_head mit N(0,1e-3), log_std-Bias auf log(0.15)≈-1.9) als Gegenmaßnahme
+    gegen die früher beobachtete Q-Divergenz.
+  - Vier strukturell identische Critic-Instanzen (critic_1/2, target_critic_1/2) für Clipped
+    Double-Q + Polyak-Averaging (τ=0.005) erklärt, inkl. der bereits bestehenden
+    get_sac_hidden_dims()-Konsistenzprüfung (ValueError bei Architektur-Abweichung zwischen
+    den 4 Rollen).
+
+ERGEBNIS: vollständiger .tex-Abschnitt inkl. Vergleichstabelle (Hidden Dims, Aktivierung,
+σ-Parametrisierung, Preprocessing, Discount-Faktor, Lernrate, Batch-Größe, Replay-/Rollout-
+Mechanismus je Algorithmus) nur im Scratchpad abgelegt
+(/tmp/.../scratchpad/network_architecture_section.tex), NICHT ins Projekt-Repo geschrieben —
+reines Thesis-Schreibhilfsmittel, kein Code-Artefakt.
+
+
+--------------------------------------------------------------------------------
+2. ERKLÄRUNG: WELCHE DATEN FLIESSEN IN DIE POLICY-STANDARDABWEICHUNG EIN
+--------------------------------------------------------------------------------
+
+User-Frage zunächst mehrdeutig (mehrere "Standardabweichungen" im Projekt denkbar) — per
+AskUserQuestion geklärt: gemeint war die Policy-Standardabweichung (Exploration), nicht
+RunningStandardScaler oder Sensor-Rauschen.
+
+BEANTWORTET (gegen skrl-Source gaussian.py verifiziert):
+  - PPO: log_std_parameter ist ein GLOBALER, zustandsUNabhängiger Parameter (kein Netzwerk-
+    Input) — sieht die Observation nie, wird nur durch Gradienten aus Entropy-Bonus
+    (entropy_loss_scale) und PPO-Surrogate-Loss getrieben.
+  - SAC: log_std_head ist ein echter Netzwerk-Head, hängt von der Observation ab (läuft durch
+    den [128,128]-Trunk); Optimierung über automatischen Entropie-Regler (learn_entropy,
+    target_entropy=-9.0), nicht über einen fixen Bonus.
+
+
+--------------------------------------------------------------------------------
+3. GEGENPRÜFUNG EINER EXTERNEN REWARD-KONFLIKT-ANALYSE — WIDERLEGT
+--------------------------------------------------------------------------------
+
+User legte eine "Reward-Konflikt-Analyse" (Movement Penalty 15.0 vs. Action-Rate-Penalty -0.02,
+Verhältnis 750:1) mit Config-Werten actor_hidden_dims=[32,32], init_noise_std=1.0,
+entropy_coef=0.005 vor, samt Kausalbehauptung "Movement Penalty treibt σ hoch, weil mehr
+Exploration mehr Bewegungschancen bedeutet" und einem Formulierungsvorschlag für die Thesis.
+
+VERIFIKATION (gegen aktuellen Code + ALLE historischen params/agent.yaml-Dumps, auch alte
+RSL-RL-Runs von Juni):
+  - [32,32] als Hidden-Dims kommt NIRGENDS im gesamten Projekt vor (weder aktuelle
+    skrl_ppo_cfg.yaml [256,256,128], noch rsl_rl_ppo_cfg.py [128,128], noch irgendein
+    geloggter historischer Run). entropy_coef=0.005 findet sich nur in Cartpole-Testruns,
+    nicht bei PhantomX (dort historisch 0.001, aktuell via skrl 0.01).
+  - Die Werte scheinen aus zwei verschiedenen Config-Ständen vermischt oder aus einem anderen
+    Projekt/Kontext zu stammen — als Diskrepanz an den User zurückgemeldet.
+  - Kausalmechanismus selbst am skrl-Source widerlegt: log_std_parameter bekommt KEINEN
+    direkten Kanal von einem einzelnen Reward-Term. Movement Penalty beeinflusst nur μ(s),
+    nicht direkt σ. Die tatsächlich in früheren Sessions (07-09, 07-14) dreifach verifizierte
+    Erklärung (Entropy-Bonus + clip_actions:False + KLAdaptiveLR-Fehlverhalten + harter
+    Deckel) trat in JEDEM analysierten Run auf, unabhängig vom Reward-Gewicht — spricht gegen
+    jede Erklärung, die an einem einzelnen Reward-Term aufgehängt ist.
+
+Dem User angeboten, einen korrigierten Absatz zu schreiben (verifizierter Mechanismus ODER
+vorsichtigere, als Hypothese gekennzeichnete Reward-Gewichts-Formulierung) — noch offen, User
+hat stattdessen direkt nach der eigenen Einschätzung zur σ-Explosion gefragt (Punkt 4).
+
+
+--------------------------------------------------------------------------------
+4. EIGENE ANALYSE/VERMUTUNG ZUR PPO-STANDARDABWEICHUNGS-EXPLOSION
+--------------------------------------------------------------------------------
+
+Sauber getrennt in VERIFIZIERT (3× unabhängig in TensorBoard bestätigt, Logs 07-09/07-14) vs.
+VERMUTUNG dargestellt:
+  VERIFIZIERT: 4-gliedrige Feedback-Loop — (1) Entropy-Bonus zieht σ aktiv nach oben,
+  (2) clip_actions:False → skrl berechnet Entropie auf UNGECLIPPTER Verteilung obwohl Env
+  später hart auf [-1,1] klemmt, (3) wachsendes σ → wachsende KL-Divergenz →
+  KLAdaptiveLR reagiert in den echten Läufen mit STEIGENDER statt fallender LR (verstärkt statt
+  bremst), (4) harter Deckel max_log_std=2.0, dort für den Rest des Trainings eingefroren.
+  EIGENE VERMUTUNG (begründet, nicht bewiesen): Hauptverdächtiger ist Glied 2
+  (clip_actions:False), nicht die Größe des Entropy-Bonus selbst — die Policy optimiert nie
+  auf der tatsächlich wirksamen (geclippten) Verteilung. Deckt sich mit dem seit 07-09
+  empfohlenen, nie umgesetzten Fix (clip_actions:True + max_log_std runter).
+  ALS SPEKULATIV (nicht als Hauptmechanismus) eingeordnet: ein möglicher indirekter Effekt von
+  Reward-Gewichten über erhöhte Advantage-Varianz auf σ — nicht getestet, nicht in den Logs
+  belegt, explizit als schwächere Nebenhypothese markiert.
+
+
+--------------------------------------------------------------------------------
+5. ANALYSE DER HEIGHT-TRACKING-FORMEL — KEIN BUG, ABER KALIBRIERUNGS-MISMATCH GEFUNDEN
+--------------------------------------------------------------------------------
+
+User-Beobachtung: target_base_height frei einstellbar, aber mean_base_height landet immer bei
+0.16-0.18 m und height_tracking bekommt trotzdem positiven Reward — Verdacht auf Rechenfehler.
+
+VERIFIKATION (Reward/Termination/Metrik-Logging Zeile für Zeile verglichen): alle drei nutzen
+identisch body_pos_w[MP_BODY].z - terrain.env_origins[:,2] — intern konsistent, KEIN
+Formel-Bug. target_base_height war zwischenzeitlich vom User selbst auf 0.08 (PPO) bzw. 0.06
+(SAC) geändert worden (vorher 0.11/0.11 beim letzten Check).
+
+BEFUND: height_error-Kernel (Divisor fix 0.02, phantomx_thesis_env.py:271) verzeiht bei
+target=0.08 einen Fehler von 8-10cm noch mit 61-73% Reward — bei einem so kleinen Zielwert ist
+das eine riesige relative Toleranz. Der Kernel wurde nie neu kalibriert, nachdem
+target_base_height über die Projekthistorie mehrfach gesenkt wurde (0.20→0.17→0.15→0.11→0.08).
+Geometrie verifiziert (URDF + phantomx.py): Spawn-Höhe von MP_BODY ist 0.28m (base_link
+z=0.18 + 0.10m URDF-Offset j_phantomx_attachment) — die gemessenen 0.16-0.18m sind plausibel
+die natürliche kinematische Standhöhe bei Default-Pose, nicht ein Policy-Fehlverhalten. Bereits
+in Log 07-09 §16 als offene, nie verifizierte Frage markiert ("Roboter spawnen, Default-Pose
+halten, MP_BODY-Höhe empirisch ablesen") — jetzt durch die User-Beobachtung faktisch
+beantwortet.
+
+EMPFEHLUNG (nicht umgesetzt, nur Diagnose): (1) reale Standhöhe empirisch bestätigen und
+target_base_height dorthin verschieben statt bei 0.08 zu belassen, (2) unabhängig davon den
+Kernel-Divisor (aktuell hartcodiert 0.02) verengen (z.B. auf 0.002-0.005), sobald der Zielwert
+feststeht.
+
+
+--------------------------------------------------------------------------------
+6. ZWISCHENFRAGE: ACTION SPACE AUF 1 STELLEN / DEFAULT-POSE ÄNDERN
+--------------------------------------------------------------------------------
+
+Kurz beantwortet (kein Code geändert): action_space=18 ist direkt an die Physik gekoppelt (6
+Beine × 3 Gelenke) — auf 1 gestellt, würde das Training crashen (Shape-Mismatch beim Zuweisen
+der Joint-Position-Targets), kein sinnvoller Tuning-Parameter. Für weniger Freiheitsgrade pro
+Bein wäre ein Umbau in _pre_physics_step nötig (nicht gesteuerte Gelenke fix klemmen), nicht nur
+eine Zahl ändern. Default-Pose (PHANTOMX_CFG.init_state.joint_pos in
+isaaclab_assets/robots/phantomx.py) ist dagegen unproblematischer änderbar, wirkt sich aber
+direkt auf target_base_height/Kinematik aus (siehe Punkt 5) und würde bestehende
+Reward-Kalibrierung entwerten.
+
+
+--------------------------------------------------------------------------------
+7. BEREINIGUNG DER TRAININGS-RUN-VERZEICHNISSE + AGENT-EVALUATION-REPORT
+--------------------------------------------------------------------------------
+
+Auftrag: alle Agenten in scripts/skrl/logs/skrl/phantomx_ppo und phantomx_sac analysieren,
+Runs OHNE Checkpoint oder mit maximalem Checkpoint <= 100k Schritten löschen, danach eine .txt
+mit Action Space/wichtigsten Parametern/erreichten Iterationen/Bewertung 0-10 je verbleibendem
+Agent erzeugen.
+
+VORGEHEN:
+  - Analyseskript gebaut (tensorboard.backend.event_processing.event_accumulator + PyYAML,
+    via /isaac-sim/python.sh, da kein normales python3 im PATH dieser Sandbox) — für jeden der
+    78 vorgefundenen Run-Ordner (51 PPO, 27 SAC) Checkpoint-Steps, params/agent.yaml,
+    params/env.yaml (yaml.unsafe_load nötig wegen !!python/tuple-Tags — vertrauenswürdiges,
+    projekteigenes Artefakt, kein Sicherheitsrisiko) und TensorBoard-Endmetriken ausgelesen.
+  - Löschregel angewendet: 44 von 78 Runs betroffen (26 PPO ohne jeden Checkpoint, 18 SAC
+    davon 17 ohne Checkpoint + 1 SAC-Run mit nur 40k Schritten). Liste dem User per
+    AskUserQuestion zur Bestätigung vorgelegt (irreversible Aktion) — bestätigt, alle 44
+    gelöscht (Existenz aller 44 Pfade vor dem rm -rf verifiziert). Verbleibend: 26 PPO- + 9
+    SAC-Runs.
+  - Report-Skript erweitert: pro Run Action/Observation-Space, num_envs, Netzwerk-Layer,
+    Kern-Hyperparameter (getrennt PPO: rollouts/mini_batches/ratio_clip/entropy_loss_scale;
+    SAC: polyak/batch_size/target_entropy/NStepMemory-Config), wichtigste Env-Parameter
+    (movement_speed_x, target_base_height, Kernel-Widths, strict_action_pipeline,
+    clamp_reward), sowie eine Heuristik-Bewertung 0-10 je Algorithmus.
+  - BEWERTUNGS-HEURISTIK (automatisiert, keine Sim-Inspektion möglich — kein CUDA in dieser
+    Sandbox): PPO prüft Trainingsvollständigkeit, Policy-Std-Explosion
+    (Endwert vs. exp(max_log_std)-Deckel), Reward-Trend, avg_forward_speed_mps vs. Kommando,
+    Episode/Total timesteps (min, Sofort-Tod-Indikator), Gait-Qualitäts-Proxies. SAC zusätzlich
+    Q1(min/max)-Divergenz-Check, Entropy-Coefficient-Kollaps, Episodenlängen-Stabilität.
+  - BEKANNTE EINSCHRÄNKUNG DER HEURISTIK (dem User mitzuteilen): am Beispiel
+    2026-07-14_14-42-29_ppo_torch (Endnote 0.5/10, korrekt niedrig wegen σ am Deckel UND
+    avg_forward_speed_mps≈0) zeigt sich, dass die Reward-Trend-Teilbegründung ("Reward/Total
+    reward (mean) stabil bis wachsend", da Reward bei 531.8 hoch bleibt) im Kontext irreführend
+    ist — hoher Gesamt-Reward kann trotz kompletten Bewegungsausfalls entstehen, wenn andere
+    Reward-Terme (Alive, Foot-Contact etc.) das kompensieren. Die AGGREGIERTE Endnote bleibt in
+    diesem Fall trotzdem korrekt niedrig (σ-Explosions- und Bewegungs-Check dominieren), aber
+    einzelne Teilbegründungen im Report sollten nicht isoliert, sondern nur im Gesamtkontext
+    aller gelisteten Gründe gelesen werden.
+  - Formatierungs-Nachbesserung: Reward-Rundung von .1f auf .3f erhöht (vorher z.B. "-0.0435"
+    als "NEGATIV (-0.0)" dargestellt — missverständlich).
+
+ERGEBNIS: logs/agent_evaluation_report.txt (INS PROJEKT-REPO geschrieben, nicht Scratchpad —
+auf Anweisung als dauerhaftes Artefakt gedacht). Enthält Kopf mit Bewertungsskala/Methodik,
+je Agent einen vollständigen Block (Iterationen, Checkpoints, Action/Observation-Space,
+Modell-/Env-Parameter, TensorBoard-Endstand, Bewertung + Begründungszeilen), sowie eine
+abschließende, nach Bewertung sortierte Gesamtübersicht beider Algorithmen.
+
+BESTE/SCHLECHTESTE BEWERTETE RUNS (aus der Zusammenfassung, zur Einordnung):
+  PPO: bester 2026-07-21_12-16-42_ppo_torch (7.0/10), schlechtester
+       2026-07-14_14-42-29_ppo_torch (0.5/10, bekannter σ-Explosions-Fall aus Log 07-14 §4).
+  SAC: bester 2026-07-15_23-37-08_sac_torch (7.5/10), schlechtester
+       2026-07-21_22-04-49_sac_torch (3.5/10).
+
+
+--------------------------------------------------------------------------------
+8. GEÄNDERTE/GELÖSCHTE/NEUE ARTEFAKTE DIESER SESSION
+--------------------------------------------------------------------------------
+
+Gelöscht (44 Run-Verzeichnisse, nach User-Bestätigung):
+  scripts/skrl/logs/skrl/phantomx_ppo/  — 26 Run-Ordner ohne jeden Checkpoint
+  scripts/skrl/logs/skrl/phantomx_sac/  — 17 Run-Ordner ohne Checkpoint + 1 mit nur 40k Schritten
+
+Neu (im Projekt-Repo):
+  logs/agent_evaluation_report.txt  — vollständiger Bewertungsreport aller 35 verbleibenden
+                                       Agenten (26 PPO, 9 SAC)
+  logs/2026-07-22_session_history.txt  — dieser Log
+
+Nur im Scratchpad (kein Projekt-Artefakt):
+  network_architecture_section.tex  — Thesis-Abschnitt Actor/Critic-Architektur
+  analyze_runs.py, generate_report.py  — Hilfsskripte für die Run-Auswertung
+
+KEINE Code-Änderung an env.py/env_cfg.py/den YAMLs in dieser Session — alle Analysen (Punkte
+2-6) blieben rein diagnostisch, keiner der dort besprochenen Fixes wurde umgesetzt.
+
+
+--------------------------------------------------------------------------------
+9. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. PPO-Entropie-Fix (clip_actions:True, max_log_std runter) weiterhin nicht umgesetzt — seit
+   Log 07-09 wiederholt empfohlen, jetzt zusätzlich durch die Vermutung aus Punkt 4 gestützt
+   (clip_actions:False als Hauptverdächtiger, nicht nur die Bonus-Größe).
+2. target_base_height/Height-Kernel-Mismatch aus Punkt 5 — reale Standhöhe empirisch
+   bestätigen (Default-Pose halten, MP_BODY-Höhe ohne Policy-Aktion ablesen), danach
+   target_base_height UND den hartcodierten Kernel-Divisor (0.02) gemeinsam neu kalibrieren.
+3. Externe Reward-Konflikt-Analyse aus Punkt 3 bleibt widerlegt/ungeklärt in der Herkunft der
+   [32,32]-Werte — falls der User das für die Thesis nutzen will, sollte die Quelle geklärt
+   und der Text entsprechend korrigiert werden (Angebot steht, noch nicht angenommen).
+4. Der neue Report (logs/agent_evaluation_report.txt) referenziert Runs, die jetzt Teil der
+   dauerhaften Projekt-Historie sind — bei zukünftigen neuen Trainingsläufen den Report
+   manuell nachziehen, kein automatischer Trigger vorhanden.
+5. Alle aus Log 07-20 bereits offenen Punkte bleiben unverändert offen (Strafing/Kurven-Plan
+   nicht umgesetzt, Live-Steuerungsskript nicht gebaut, kein Git-Commit über den weiterhin
+   wachsenden uncommitteten Stand).
+
+================================================================================

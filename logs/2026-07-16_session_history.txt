@@ -1,0 +1,414 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-16
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-14_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. AUFTRAG — ROBOTER FÄLLT AUF UNSTRUKTURIERTEM (ROUGH-)TERRAIN DURCH DEN BODEN
+--------------------------------------------------------------------------------
+
+User-Beobachtung: seit ROUGH_TERRAINS_CFG (terrain_type="generator", 5 Sub-Terrain-Typen:
+flat/random_rough/discrete_obstacles/pyramid_slope/pyramid_stairs, curriculum=True) als
+Default-Terrain aktiv ist (seit Commit 3554da6, siehe Log 07-14 Punkt 1), fällt der Roboter
+durch den Boden, wodurch kein Training stattfindet. Betrifft beide _uneven-Task-IDs:
+Template-Phantomx-Thesis-PPO-Direct_uneven-v0 UND -SAC-Direct_uneven-v0.
+
+STRIKTE VORGABE DES USERS (Plan-Mode-Auftrag): Rewards und PPO-/SAC-Hyperparameter-Configs
+(skrl_ppo_cfg.yaml, skrl_sac_cfg.yaml, alle _reward_scale/_penalty_scale/Kernel-Width/
+Curriculum-Speed-Felder) dürfen auf KEINEN Fall angefasst werden — lange Tuning-Historie
+über mehrere Sessions (siehe Logs 07-01 bis 07-14), soll nicht gefährdet werden.
+
+
+--------------------------------------------------------------------------------
+2. ANALYSE (2 parallele Explore-Agents + eigene Verifikation gegen IsaacLab-Quellcode)
+--------------------------------------------------------------------------------
+
+Zunächst alle 4 vorherigen Logs (07-01, 07-09, 07-11, 07-12, 07-14) durchgearbeitet, dann
+git log/git diff be861a3..HEAD (07cb2d0) sowie zwei Explore-Agents parallel gestartet:
+(a) Terrain/Spawn-Logik, (b) Reward/PPO/SAC-Config-Inventar (zum Schutz vor versehentlichem
+Anfassen).
+
+BEFUND — Höhen-relative Mathematik selbst ist bereits KORREKT verdrahtet (env_origins[:,2]
+konsistent in Reward-Height-Tracking, Termination UND Spawn verwendet, an allen 3 Stellen
+verifiziert) — DAS ist nicht der Bug. Der eigentliche Bug ist ein Zusammenspiel aus zwei
+fehlenden Terrain-Curriculum-Bausteinen plus einer knappen Sicherheitsmarge:
+
+  1. max_init_terrain_level war nicht gesetzt (None) → IsaacLabs
+     TerrainImporter._compute_env_origins_curriculum() (terrain_importer.py:340-343) nutzt
+     dann num_rows-1=29 als oberes Limit und weist JEDER Env beim allerersten Spawn eine
+     zufällige Terrain-Row zwischen 0 (flach) und 29 (steilste Treppe/Hang) zu
+     (terrain_levels = torch.randint(0, max_init_level+1, ...), terrain_importer.py:346).
+     Isoliert mit reinem Python nachgerechnet (kein CUDA nötig): ohne Fix starten ca. 15% der
+     Envs auf Terrain-Row >=25 (nahe maximaler Difficulty).
+  2. Die Curriculum-Progression (TerrainImporter.update_env_origins(), hoch-/runterstufen nach
+     zurückgelegter Distanz) wurde NIE aufgerufen — String "update_env_origins" kam in
+     phantomx_thesis_env.py kein einziges Mal vor (per grep verifiziert). curriculum=True im
+     Generator war dadurch faktisch wirkungslos, jede Env blieb für immer auf ihrer
+     zufälligen Anfangsstufe hängen. Kanonisches IsaacLab-Referenzmuster gefunden:
+     isaaclab_tasks/manager_based/locomotion/velocity/mdp/curriculums.py:terrain_levels_vel
+     (Zeilen 27-56) — Distanz-basiertes move_up/move_down-Kriterium.
+  3. Spawn-Höhe hat nur ~2cm Marge zur harten oberen Todesgrenze: Robot spawnt lokal bei
+     pos=(0,0,0.18) (phantomx.py:55), MP_BODY sitzt +0.10 darüber → 0.28m lokale Spawnhöhe.
+     Obere Termination-Grenze war mp_body_height > 0.30 (hartcodiertes Literal, kein
+     Cfg-Feld, phantomx_thesis_env.py:345) — dieser Punkt war bereits in Log 07-09 (§16) als
+     Verdacht für Plane-Terrain notiert, verschärft sich unter Rough-Terrain durch
+     zusätzliche Z-Varianz je Sub-Terrain-Kachel.
+
+NEBENBEFUND (kein Blocker, nur zur Info): /workspace/isaaclab/projects/phantomx_thesis/ ist
+eine verwaiste, abweichende Kopie ohne eigenes .git (env_cfg.py unterscheidet sich, env.py
+identisch). Per `pip show phantomx_thesis` bestätigt: das tatsächlich aktive,
+editable-installierte Paket ist /workspace/projects/phantomx_thesis/source/phantomx_thesis —
+die Duplikat-Kopie ist für das Training irrelevant, keine Änderung nötig.
+
+Zusätzlich verifiziert: kein einziger geloggter Trainingslauf mit der AKTUELLEN Codebasis
+(seit dem skrl PPO+SAC-Merge) hat je terrain_type=generator genutzt (per params/env.yaml
+über alle scripts/skrl/logs/-Läufe geprüft) — nur 3 uralte Läufe von 06-09/06-10 (lange vor
+dem Merge) nutzten je generator-Terrain. Das Durchfallen-Problem wurde also vermutlich beim
+interaktiven/manuellen Testen bemerkt, nie in einem TensorBoard-Lauf.
+
+User in Rückfrage (AskUserQuestion) bestätigt: (a) echtes Terrain-Curriculum gewünscht
+(nicht nur ein einfacher Init-Cap ohne Progression), (b) beide _uneven-Task-IDs (PPO+SAC)
+betroffen.
+
+
+--------------------------------------------------------------------------------
+3. UMGESETZTE FIXES (nur phantomx_thesis_env.py + phantomx_thesis_env_cfg.py geändert)
+--------------------------------------------------------------------------------
+
+phantomx_thesis_env_cfg.py (Basisklasse terrain=TerrainImporterCfg(...)):
+  + max_init_terrain_level=0   — alle Envs starten garantiert auf der leichtesten Row (flat)
+    statt zufällig auf 0-29. Gilt nur für terrain_type="generator" (laut IsaacLab-Doku),
+    PhantomxThesisFlatEnvCfg/SACFlatEnvCfg (eigener plane-Block) sind unberührt.
+
+phantomx_thesis_env.py:
+  + neue Methode _apply_terrain_curriculum(env_ids) (direkt nach _apply_velocity_curriculum,
+    gleiches Namens-/Strukturmuster): berechnet die in der beendeten Episode zurückgelegte
+    Distanz (root_pos_w vs. altes env_origins), move_up falls distance > sub_terrain_size/2,
+    move_down falls distance < halbe Ideal-Distanz beim aktiven Kommando, ruft
+    self._terrain.update_env_origins(env_ids, move_up, move_down) auf. No-op falls
+    terrain_generator is None (Flat-Task-IDs bleiben unverändert).
+  + Aufruf in _reset_idx(): self._apply_terrain_curriculum(env_ids) VOR
+    self._apply_velocity_curriculum(env_ids) — Reihenfolge ist wichtig, da
+    _apply_velocity_curriculum self._commands überschreibt und die Distanz-Berechnung noch
+    die alten (während der beendeten Episode aktiven) Commands braucht.
+  + Literal-Änderung in _get_dones(): obere Todesgrenze mp_body_height > 0.30 → > 0.40.
+    Bewusst NICHT über termination_height/termination_tilt (das sind Reward-adjacente,
+    User-getunte Cfg-Felder) gelöst, sondern nur das hartcodierte, ungetunte
+    Sicherheits-Literal angehoben — reiner Sicherheitsabstand, keine Reward-Wirkung.
+
+skrl_ppo_cfg.yaml / skrl_sac_cfg.yaml: UNVERÄNDERT (enthalten laut Explore-Agent-Inventar
+ohnehin keine einzige Terrain-Referenz). Keine _reward_scale/_penalty_scale/Kernel-Width/
+Curriculum-Speed-Felder in env_cfg.py berührt. _get_rewards(), _compute_movement_penalty(),
+_apply_velocity_curriculum() unverändert (per git diff --stat bestätigt: nur die 2 genannten
+.py-Dateien geändert, +31/-1 Zeilen gesamt).
+
+
+--------------------------------------------------------------------------------
+4. VERIFIKATION — EINGESCHRÄNKT, KEIN CUDA IN DIESER SANDBOX VERFÜGBAR
+--------------------------------------------------------------------------------
+
+- py_compile (/isaac-sim/kit/python/bin/python3.11) auf beide geänderte Dateien: fehlerfrei.
+- Smoke-Test-Versuch (--task Template-Phantomx-Thesis-PPO-Direct_uneven-v0 --algorithm PPO
+  --num_envs 64 --headless --max_iterations 5) schlägt beim Kit-Start fehl:
+  "CUDA error: no CUDA-capable device is detected" (omni.physx.tensors.plugin,
+  omni.gpucompute-cuda.plugin, NVML_ERROR_UNKNOWN). /dev/nvidia*-Devices sind zwar vorhanden,
+  aber kein funktionierender CUDA-Treiber-Stack — deckt sich mit der in mehreren früheren
+  Logs (u.a. 07-11 Punkt 6) dokumentierten Einschränkung dieser Sandbox. Auch reines
+  torch-Importieren (ohne Kit) schlägt fehl (libcublas.so nicht gefunden) — dieses
+  torch-Build ist zwingend CUDA-gebunden, kein CPU-Fallback möglich.
+- Ersatzweise (wie in Log 07-11 "Verifikation B" vorgemacht): Kernarithmetik isoliert mit
+  reinem Python (kein torch nötig) durchgerechnet:
+  - max_init_terrain_level=0 nachgebaut: bestätigt zwingend terrain_level=0 für alle Envs
+    (randint(0, 0+1) ist immer 0), im Kontrast dazu ohne Fix ca. 15% der Envs auf Row >=25.
+  - _apply_terrain_curriculum-Schwellwerte (move_up=4.0m bei size=8x8, move_down je nach
+    Curriculum-Phase 0/0.75/1.5m) durchgerechnet: kein Div/0 bei commands=0 (frühe
+    PPO-Phase, move_down-Schwelle wird dann exakt 0 → kein Downgrade), sinnvolle
+    Schwellwerte in allen Phasen.
+
+STATUS: Fix ist vollständig umgesetzt und lokal so weit wie in dieser Sandbox möglich
+verifiziert (Compile + isolierte Arithmetik-Verifikation). KEIN echter Isaac-Sim-Trainingslauf
+in dieser Sandbox möglich — muss vom User auf einer GPU-fähigen Maschine bestätigt werden.
+
+
+--------------------------------------------------------------------------------
+5. NEBEN-EREIGNIS: MONITOR-TASK-VERWIRRUNG (nur zur Vollständigkeit protokolliert)
+--------------------------------------------------------------------------------
+
+Während/nach dem gescheiterten Smoke-Test-Versuch kamen mehrere verzögerte, teils
+fragmentierte System-Benachrichtigungen eines Monitor-Tasks (bn46s4k3x) an, der zuvor auf
+das Smoke-Test-Log gesetzt worden war (Timeout, dann einzelne nachgereichte Log-Zeilen,
+dann "stopped"-Status ohne klaren Abschluss-Marker). Diese Ereignisse stammten allesamt aus
+dem bereits ausgewerteten, abgeschlossenen CUDA-Fehler-Log von Punkt 4 — kein neuer Vorgang,
+keine Aktion nötig. Explizit klargestellt (wichtig für künftige Sessions): solche
+Background-Task-Notifications sind KEINE User-Eingaben und wurden nicht als Bestätigung/
+Zustimmung fehlinterpretiert.
+
+
+--------------------------------------------------------------------------------
+6. NACHTRAG — GLEICHE REIHE-BUG: max_init_terrain_level=0 ZWANG ALLE ENVS AUF ROW 0
+--------------------------------------------------------------------------------
+
+User-Beobachtung NACH dem Fix aus Punkt 1-4 (live in der Sim beobachtet, kein CUDA in dieser
+Sandbox, daher rein aus der Beschreibung diagnostiziert): Roboter fallen nicht mehr durch,
+werden aber alle auf derselben Y-Achse am Rand des Feldes gespawnt — anfangs kurz verstreut
+(GridCloner-Frame, 3m-Raster), dann kollabieren sie sichtbar in eine einzige Reihe. Fläche bis
+auf diese eine Reihe leer.
+
+URSACHE (durch den Fix aus Punkt 1-4 selbst verursacht): max_init_terrain_level=0 →
+IsaacLab: self.terrain_levels = torch.randint(0, 0+1, ...) → GARANTIERT 0 für JEDE Env
+(terrain_importer.py:347). env_origins[:] = terrain_origins[terrain_levels, terrain_types] mit
+terrain_levels konstant 0 → alle Envs auf exakt derselben Terrain-ROW (feste Y-Koordinate),
+nur terrain_types (Spalte/X) variiert noch. 29 von 30 Terrain-Reihen blieben ungenutzt —
+exakt das beobachtete Bild.
+
+FIX: neue Methode _init_terrain_grid() in phantomx_thesis_env.py, aufgerufen in _setup_scene()
+direkt nach self._terrain = self.cfg.terrain.class_type(...). Ersetzt IsaacLabs
+torch.randint-Zuweisung durch deterministisches Round-Robin-Raster:
+  row = env_idx % init_terrain_rows
+  col = (env_idx // init_terrain_rows) % num_cols
+Row wird ZUERST durchgetaktet (nicht Col), damit auch bei num_envs < init_terrain_rows*num_cols
+(SAC: 128 Envs vs. 8*32=256 Zellen) noch ALLE init_terrain_rows Zeilen erreicht werden, nur mit
+weniger Spalten-Abdeckung — Zeilen-Diversität (=Difficulty-Streuung) ist das eigentliche Ziel.
+Neues Cfg-Feld init_terrain_rows: int = 8 in der Basisklasse (phantomx_thesis_env_cfg.py) statt
+max_init_terrain_level=0 (bleibt im TerrainImporterCfg als IsaacLab-interner Fallback stehen,
+wird von _init_terrain_grid() aber überschrieben).
+
+VERIFIKATION (reine Index-Arithmetik, kein torch/CUDA nötig): PPO (512 envs) -> alle 8 Rows x
+alle 32 Cols gleichmäßig belegt (je 16 Envs/Zelle, 96 Zellen alle befüllt). SAC (128 envs) ->
+alle 8 Rows erreicht (nur 16/32 Cols genutzt, unvermeidbar bei weniger Envs als Zellen, aber
+Zeilen-Diversität war das Ziel). Edge Cases (init_terrain_rows=0 -> klemmt auf 1,
+>num_rows -> klemmt auf num_rows) korrekt. Difficulty-Spanne bei Row 0-7: ~0-27%
+((row+η)/30 laut IsaacLab-Formel) — bewusst unter den höchsten Rows (25-29, >80%), damit nicht
+ein Teil der Envs sofort wieder auf der schwierigsten Stufe landet (Grund des ursprünglichen
+max_init_terrain_level-Fixes).
+
+self._terrain.max_terrain_level wird von _init_terrain_grid() ebenfalls auf num_rows gesetzt
+(identisch zu IsaacLabs Original-Wert) — update_env_origins()-Verhalten bei Hochstufung über
+die höchste Row (Sprung auf zufällige Row) bleibt dadurch unverändert korrekt.
+
+
+--------------------------------------------------------------------------------
+7. NACHTRAG — KOLLISIONS-RÜCKFRAGE (nur Erklärung, keine Code-Änderung)
+--------------------------------------------------------------------------------
+
+User-Frage: passt die neue 8-Reihen-Verteilung, wenn sich die Hexapods im Training nicht
+gegenseitig behindern? Bestätigt: self.scene.filter_collisions(global_prim_paths=
+[self.cfg.terrain.prim_path]) (env.py, seit vorher unverändert) deaktiviert explizit alle
+Env-zu-Env-Kollisionen und aktiviert nur Kollision mit dem globalen Terrain-Prim — war schon
+vor der heutigen Session so, von den Grid-Änderungen unberührt. Räumliche Überlappung von
+env_origins ist damit strukturell unproblematisch, unabhängig von der Terrain-Verteilung.
+
+
+--------------------------------------------------------------------------------
+8. PYRAMIDEN-TERRAINS DURCH GRAVEL ERSETZT + GRAVEL-INTENSITÄT ANGEPASST
+--------------------------------------------------------------------------------
+
+User-Auftrag: Bestandsaufnahme der Sub-Terrain-Typen, dann pyramid_slope/pyramid_stairs
+("wenig Trainingsnutzen") durch Gravel-Varianten ersetzen. Per AskUserQuestion geklärt: zwei
+Gravel-Varianten (fein/grob) statt der Pyramiden, 5 Typen bleiben erhalten (weiterhin je 20%).
+
+UMGESETZT (ROUGH_TERRAINS_CFG in phantomx_thesis_env_cfg.py):
+  pyramid_slope (HfPyramidSlopedTerrainCfg)   -> gravel_fine (HfRandomUniformTerrainCfg)
+  pyramid_stairs (MeshPyramidStairsTerrainCfg) -> gravel_coarse (HfRandomUniformTerrainCfg)
+HfRandomUniformTerrainCfg ignoriert laut IsaacLab-Doku den difficulty-Parameter (fixer
+noise_range) — fein/grob-Differenzierung läuft daher rein über unterschiedliche feste
+noise_range-Werte, nicht über die Curriculum-Row. mesh_gen-Import bleibt gültig (nur noch für
+"flat" gebraucht).
+
+DANACH: User fand die Werte insgesamt zu hart ("etwas weniger hart gestalten"). Per
+AskUserQuestion: moderate Reduktion (~60% der Werte) gewählt. Alle 4 Height-Field-Blöcke
+(random_rough, discrete_obstacles, gravel_fine, gravel_coarse) proportional runterskaliert,
+relative Abstufung (fein < random_rough < grob) beibehalten:
+
+  Sub-Terrain          | Erste Erhöhung (früher am selben Tag) | Nach ~60%-Reduktion (aktuell)
+  random_rough          | 0.03-0.12 m                          | 0.02-0.07 m
+  discrete_obstacles     | 0.03-0.09 m                          | 0.02-0.055 m
+  gravel_fine (neu)      | 0.02-0.10 m                          | 0.015-0.06 m
+  gravel_coarse (neu)    | 0.05-0.12 m                          | 0.03-0.07 m
+  flat                   | unverändert (kein Höhenprofil)       | unverändert
+
+Sicherheitsmarge zu termination_height≈0.10m/target_base_height=0.11m durchgehend beachtet
+(oberes Ende jeweils klar darunter). py_compile nach jeder Änderung fehlerfrei.
+
+
+--------------------------------------------------------------------------------
+9. REWARD-DESIGN-DISKUSSION: GROSSE SCHRITTE STATT ZITTERN (nur Erklärung, kein Fix)
+--------------------------------------------------------------------------------
+
+User-Frage: wie einen Reward gestalten, der große Schritte fördert statt kleines
+Vor-Zurück-Zittern? Diskutiert, noch NICHT umgesetzt (User brach zur Klärung von
+action_rate_l2 ab, kam nicht mehr auf die ursprüngliche Frage zurück).
+
+GEKLÄRT: action_rate_l2 = sum((actions_t - actions_{t-1})²) * action_rate_reward_scale(-0.02)
+bestraft die ÄNDERUNGSRATE der Aktion zwischen Steps, NICHT deren absolute Größe. Ein großer,
+über mehrere Steps sanft aufgebauter Schritt hat kleines Δaction pro Step (kaum Strafe);
+hochfrequentes kleines Zittern kann trotz kleiner Einzel-Δs ähnlich viel/mehr Strafe pro
+Zeiteinheit erzeugen, weil sie bei jedem Step neu anfällt. Es gibt AKTUELL KEINEN Reward-Term,
+der explizit zwischen "großem sauberem Schritt" und "häufigem kleinem Wackeln" unterscheidet.
+
+3 Ansatz-Optionen vorgestellt, User hat sich noch NICHT entschieden:
+  a) Echte Schrittweite pro Fuß (Lift-off->Touch-down-XY-Distanz) — präzise, braucht neuen
+     persistenten State (Fuß-Position bei letztem Lift-off, aus self._robot.data.body_pos_w an
+     den self._die_body_ids, da ContactSensorData selbst keine Position liefert, nur
+     current_air_time/net_forces_w).
+  b) Action-Amplitude-Bonus (Gegenteil von action_rate_l2) — kein neuer State, aber nur grober
+     Proxy (Gelenkwinkel-Amplitude ≠ tatsächliche Fußstrecke am Boden).
+  c) Fuß-Geschwindigkeit während Schwungphase (current_air_time>0) — kein Lift-off-State nötig,
+     aber Schrittlänge nur indirekt über Tempo statt Distanz erfasst.
+
+STATUS: offen für nächste Session — User-Entscheidung zwischen a/b/c aussteht, dann erst
+Implementierung.
+
+
+--------------------------------------------------------------------------------
+10. GAZEBO/ROS2-DEPLOYMENT: SIM-TO-SIM/SIM-TO-REAL-GAP-ANALYSE (play.py vs. Gazebo-Interface)
+--------------------------------------------------------------------------------
+
+User-Auftrag: scripts/skrl/play.py analysieren (glättet es die Policy?) und mit dem
+Gazebo-Deployment-Skript vergleichen, um den Sim-Gap zu verkleinern. WICHTIG: das
+ROS2-Deployment liegt NICHT im phantomx_thesis-Repo/dieser Sandbox, sondern unter
+/workspace/ros2_ws/src/phantomx_package/ (separates Top-Level-Verzeichnis, kein eigenes .git,
+nie Teil der phantomx_thesis-Git-Historie) UND wird vom User teils in einem ANDEREN
+Docker-Container mit einer separaten Claude-Code-Instanz bearbeitet.
+
+KLARGESTELLT: play.py glättet NICHTS — sendet die deterministischen mean_actions roh an
+env.step(), ohne EMA/Rate-Limiting. Ein solches Smoothing (SmoothPolicyRunner, EMA α=0.20,
+Rate-Limit auf max. 0.8 rad/s) existierte historisch in einem Skript export_policy_ros2.py
+(dokumentiert in Log 2026-07-01), ist im aktuellen ros2_ws/.../export_policy.py NICHT mehr
+vorhanden (nur noch reine Policy-Bündelung/TorchScript-Export, kein Smoothing) — beim Umbau
+auf SKRL PPO+SAC (07-11-Merge) offenbar verlorengegangen. Aktuell existiert NIRGENDS
+(weder Isaac Lab noch ROS2/Gazebo) ein Smoothing-Mechanismus zwischen Policy-Output und
+Motor-Kommando.
+
+VOLLSTÄNDIGER ABGLEICH play.py / phantomx_thesis_env.py vs.
+phantomx_policy_simulation_interface.py, Punkt für Punkt:
+
+  BEREITS KORREKT (verifiziert, kein Handlungsbedarf):
+  - Observation-Reihenfolge/-Größe (66-dim: lin_vel_b, ang_vel_b, gravity_b, commands,
+    jpos_rel, jvel, last_actions) exakt deckungsgleich.
+  - last_actions-Cross-Step-Timing: in beiden Fällen strukturell identisch (obs_t enthält die
+    beim VORHERIGEN Schritt gesendete, geclippte-aber-unskalierte Aktion; die neue Aktion wird
+    danach im selben Loop-Durchlauf für den nächsten Schritt gespeichert) — anhand der exakten
+    DirectRLEnv.step()-Reihenfolge (_pre_physics_step -> _apply_action -> ... ->
+    _get_observations) explizit gegengerechnet, kein Lag-Bug.
+  - Action-Pipeline (clip[-1,1] -> scale -> +default -> clamp auf q_def±joint_pos_limit)
+    strukturell identisch zu _pre_physics_step() bei strict_action_pipeline=True.
+  - ACTION_SCALE=0.75 / JOINT_LIMIT=1.0 im ROS2-Skript passen zum aktuellen
+    phantomx_thesis_env_cfg.py (war zum Analysezeitpunkt schon vom User selbst korrigiert
+    worden, ACTION_SCALE stand früher noch auf dem veralteten Wert 0.5).
+  - Quaternion-Gravity-Projektion (_quat_rotate_inv), Joint-Order-Mapping
+    (POLICY_TO_MOTOR/MOTOR_TO_POLICY) unverändert korrekt (bereits in früheren Sessions
+    verifiziert).
+
+  NEU GEFUNDEN — Checkpoint/Konstanten-Mismatch bei SAC (höchste Priorität):
+  POLICY_PATHS["sac"] zeigt auf policy_2026_07_12_sac.pt, laut User-Kommentar im Skript selbst
+  mit "action scale: 0.5" trainiert — aber die globale Konstante ACTION_SCALE=0.75 gilt für
+  BEIDE Algorithmen gleichzeitig (kein algorithmusabhängiger Wert). Bei Wahl von "sac" würde
+  aktuell mit dem falschen (zu großen) Skalierungsfaktor gerechnet. NICHT selbst gefixt
+  (gehört dem anderen Docker/Claude-Code-Agenten) — nur identifiziert und im Prompt an den
+  anderen Agenten dokumentiert (siehe unten).
+
+  Kein Sensorrauschen im ROS2-Skript (Observation wird ohne künstliches Rauschen gebaut,
+  während das Training seit Log 07-14 additives Gauß-Rauschen auf lin_vel/ang_vel/gravity
+  (σ=0.01), jpos_rel (σ=0.01), jvel (σ=0.05) addiert) — als Beobachtung eingeordnet, KEIN Bug:
+  echte/synthetische Gazebo-Sensoren liefern ihr eigenes Rauschen, künstliches Zusatzrauschen
+  wäre in Gazebo typischerweise nicht gewünscht.
+
+  self.commands hardcodiert [0.07, 0.0, 0.0] vs. aktuellem movement_speed_x=0.075 im Training
+  — kleine Inkonsistenz, siehe Punkt 11 (direkt gefixt).
+
+
+--------------------------------------------------------------------------------
+11. GAZEBO-SKRIPT: COMMAND-WERT DIREKT GEFIXT (im ros2_ws-Pfad, außerhalb des Haupt-Repos)
+--------------------------------------------------------------------------------
+
+Datei: /workspace/ros2_ws/src/phantomx_package/src/phantomx_policy_simulation_interface.py
+(NICHT Teil von phantomx_thesis/, kein Git in diesem Verzeichnis beobachtet).
+
+self.commands = np.array([0.07, 0.0, 0.0]) -> np.array([0.075, 0.0, 0.0]), Kommentar ergänzt
+(cfg.movement_speed_x, yaw=0 da yaw_rotation_speed_x=0.0 im Training). py_compile fehlerfrei.
+
+
+--------------------------------------------------------------------------------
+12. PROMPTS FÜR DEN ANDEREN CLAUDE-CODE-AGENTEN (ROS2-Docker) GESCHRIEBEN
+--------------------------------------------------------------------------------
+
+Da das ROS2/Gazebo-Skript vom User in einem separaten Docker-Container mit eigener
+Claude-Code-Instanz bearbeitet wird, wurden zwei eigenständige, selbst-erklärende Prompts im
+Scratchpad abgelegt (NICHT Teil dieses Repos, nur als Übergabetext für den User gedacht):
+
+  gazebo_sim2real_prompt.md — Erstanalyse: 4 priorisierte Lücken (Action-Smoothing fehlt,
+    lin_vel_b aus /odom drifted ohne Gegenmaßnahme, keine Settle-Phase beim Start,
+    Zeitstempel-Inkonsistenz zwischen joint_states/imu/odom-Callbacks) + bestätigter
+    ACTION_SCALE=0.5-vs-0.75-Verdacht (zum Zeitpunkt der Erstanalyse noch nicht vom User
+    selbst gefixt gewesen).
+
+  gazebo_smoothing_prompt.md — Nachtrag, nachdem der User Punkt 2 (Command-Fix) hier direkt
+    erledigen ließ und für Punkt 3 (Action-Smoothing) explizit einen Prompt für den anderen
+    Agenten angefordert hat, da der die realen Gazebo-/Hardware-Parameter kennt (reales
+    Aktuator-Geschwindigkeitslimit, tatsächliche control_frequency). Enthält:
+    EMA-Glättung (_effective_actions(), vor der Skalierung) + Rate-Limiting
+    (policy_action_to_motor_commands(), nach Skalierung+Clamp, max_action_delta =
+    joint_velocity_limit_rad_s / control_frequency) + Hinweise zu State-Konsistenz beim
+    Sensor-Timeout-Zweig (DEFAULT_MOTOR_POS-Pfad) und Policy- vs. Motor-Reihenfolge der
+    State-Arrays. Enthält außerdem den NEU gefundenen SAC-Checkpoint/Konstanten-Mismatch aus
+    Punkt 10 als Kontext.
+
+STATUS: beide Prompt-Dateien liegen im Scratchpad dieser Session
+(/tmp/claude-0/-workspace/.../scratchpad/), NICHT im Projekt-Repo — nur als Kopiervorlage für
+den User gedacht, nicht persistent über diese Session hinaus. Bei Bedarf in einer künftigen
+Session neu erzeugen, falls noch relevant.
+
+
+--------------------------------------------------------------------------------
+13. GEÄNDERTE DATEIEN DIESER GESAMTEN SESSION (Teil 1 + Nachträge)
+--------------------------------------------------------------------------------
+
+Im Haupt-Repo (phantomx_thesis), nichts committed:
+  source/.../phantomx_thesis_env_cfg.py
+    -> max_init_terrain_level=0 (Teil 1); init_terrain_rows: int = 8 neues Feld (Punkt 6);
+       ROUGH_TERRAINS_CFG: pyramid_slope/pyramid_stairs -> gravel_fine/gravel_coarse,
+       anschließend alle 4 Height-Field-Blöcke auf ~60% der Werte reduziert (Punkt 8).
+  source/.../phantomx_thesis_env.py
+    -> _apply_terrain_curriculum() + Aufruf in _reset_idx(), obere Todesgrenze 0.30->0.40
+       (Teil 1); neue Methode _init_terrain_grid() + Aufruf in _setup_scene() (Punkt 6).
+
+Außerhalb des Haupt-Repos (separates Verzeichnis /workspace/ros2_ws/, eigener Docker/Agent):
+  ros2_ws/src/phantomx_package/src/phantomx_policy_simulation_interface.py
+    -> self.commands 0.07 -> 0.075 (Punkt 11). Weitere Änderungen (Action-Smoothing,
+       SAC-Konstanten-Mismatch) an den anderen Claude-Code-Agenten per Prompt übergeben,
+       NICHT von dieser Session selbst umgesetzt.
+
+Neu:
+  logs/2026-07-16_session_history.txt (dieser Log, durchgehend fortgeschrieben)
+
+NICHT geändert (weiterhin, User-Vorgabe aus Teil 1 gilt auch für alle Nachträge):
+  skrl_ppo_cfg.yaml, skrl_sac_cfg.yaml, alle _reward_scale/_penalty_scale-Felder,
+  _get_rewards(), _compute_movement_penalty(), _apply_velocity_curriculum().
+
+Kein Git-Commit dieser Session angelegt.
+
+
+--------------------------------------------------------------------------------
+14. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. ECHTEN Smoke-Test auf GPU-fähiger Maschine weiterhin ausstehend (Terrain-Fall-Fix UND
+   Grid-Verteilungs-Fix UND Gravel-Anpassung zusammen) — Startbefehle wie in der ursprünglichen
+   Punkt-7-Liste (jetzt Teil des Verlaufs oben), zusätzliches Prüfkriterium: Roboter über die
+   gesamte Fläche verteilt (nicht mehr eine Reihe), Rows 0-7 sichtbar genutzt.
+2. Reward-Design "große Schritte statt Zittern" (Punkt 9) — User-Entscheidung zwischen den
+   3 vorgestellten Optionen (Lift-off-Distanz / Action-Amplitude / Schwungphasen-Geschwindigkeit)
+   noch ausständig, danach erst Implementierung.
+3. Gazebo-Skript: Action-Smoothing (Punkt 10/12, gazebo_smoothing_prompt.md) und
+   SAC-Checkpoint/ACTION_SCALE-Mismatch beim anderen Claude-Code-Agenten nachverfolgen — Status
+   von hier aus nicht einsehbar (separater Container).
+4. Verwaiste Projekt-Kopie /workspace/isaaclab/projects/phantomx_thesis/ weiterhin ungeklärt
+   (aus Teil 1, Punkt 2 der Analyse) — unkritisch, aber offen.
+5. Kein Git-Commit dieser Session (weiterhin größerer, wachsender uncommitteter Stand) — bei
+   Bedarf nachholen.
+
+================================================================================

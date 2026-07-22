@@ -98,12 +98,50 @@ class PhantomxThesisEnv(DirectRLEnv):
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        self._init_terrain_grid()
 
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _init_terrain_grid(self):
+        """Verteilt die Envs beim Start GLEICHMÄSSIG über die leichtesten Terrain-Rows UND alle
+        Cols, statt IsaacLabs Default (torch.randint pro Env, siehe TerrainImporter.
+        _compute_env_origins_curriculum) zu übernehmen.
+
+        Hintergrund: mit dem vorherigen max_init_terrain_level=0 landete JEDE Env exakt auf Row 0
+        -> alle Envs auf identischer Y-Koordinate in einer einzigen Reihe, der Rest des Feldes
+        blieb leer (live in der Sim beobachtet). torch.randint(0, N) für N>0 hätte dasselbe
+        Klumpen-Risiko in schwächerer Form (kein Garant für Abdeckung aller Rows/Cols, vor allem
+        bei kleinem N relativ zu num_envs). Diese Methode ersetzt das durch ein deterministisches
+        Round-Robin-Raster: Env i bekommt Row i % init_terrain_rows und Col (i // init_terrain_rows)
+        % num_cols. Row wird zuerst durchgetaktet (statt Col wie in einer naheliegenderen
+        Variante), damit auch bei num_envs < init_terrain_rows*num_cols (SAC: 128 Envs vs.
+        8*32=256 Zellen) noch ALLE init_terrain_rows Zeilen erreicht werden, nur mit weniger
+        Spalten-Abdeckung — Zeilen-Diversität (= Difficulty-Streuung) ist das eigentliche Ziel,
+        Spalten-Diversität (= Sub-Terrain-Variante) nur sekundär.
+
+        No-op auf terrain_type="plane" (terrain_origins ist dann None, siehe TerrainImporter.
+        configure_env_origins) — Flat-Task-IDs bleiben unverändert.
+        """
+        if self._terrain.terrain_origins is None:
+            return
+
+        num_rows, num_cols = self._terrain.terrain_origins.shape[:2]
+        init_rows = max(1, min(self.cfg.init_terrain_rows, num_rows))
+
+        env_idx = torch.arange(self.cfg.terrain.num_envs, device=self.device)
+        rows = env_idx % init_rows
+        cols = torch.div(env_idx, init_rows, rounding_mode="floor") % num_cols
+
+        self._terrain.terrain_levels = rows.to(torch.long)
+        self._terrain.terrain_types = cols.to(torch.long)
+        self._terrain.max_terrain_level = num_rows
+        self._terrain.env_origins[:] = self._terrain.terrain_origins[
+            self._terrain.terrain_levels, self._terrain.terrain_types
+        ]
 
     # --------------------- ACTION ---------------------
     def _pre_physics_step(self, actions: torch.Tensor):
@@ -260,9 +298,9 @@ class PhantomxThesisEnv(DirectRLEnv):
         tripod_b = foot_contact_bool[:, self._TRIPOD_B].float().sum(dim=-1)
         tripod_score = torch.abs(tripod_a - tripod_b) / 3.0
 
-        # Lazy leg penalty — Beine die dauerhaft (>1s) in der Luft hängen
+        # Lazy leg penalty — Beine die dauerhaft (>2.5s) in der Luft hängen
         current_air_times = self._contact_sensor.data.current_air_time[:, self._die_body_ids]
-        lazy_legs = (current_air_times > 1.0).float().sum(dim=-1)
+        lazy_legs = (current_air_times > 2.5).float().sum(dim=-1)
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped  * self.cfg.lin_vel_reward_scale       * self.step_dt,
@@ -342,7 +380,7 @@ class PhantomxThesisEnv(DirectRLEnv):
 
         died = (
             (mp_body_height < self.cfg.termination_height) |
-            (mp_body_height > 0.30) |
+            (mp_body_height > 0.40) |
             (tilt > self.cfg.termination_tilt) |
             non_foot_contact
         )
@@ -377,6 +415,10 @@ class PhantomxThesisEnv(DirectRLEnv):
         self._previous_actions[env_ids] = 0.0
         self._has_stood_up[env_ids] = False
 
+        # Terrain-Difficulty-Umstufung MUSS vor _apply_velocity_curriculum laufen — sie braucht
+        # noch die alten (während der beendeten Episode aktiven) self._commands, die die
+        # Velocity-Curriculum-Methode direkt danach überschreibt.
+        self._apply_terrain_curriculum(env_ids)
         self._apply_velocity_curriculum(env_ids)
 
         # Reset robot state
@@ -469,6 +511,43 @@ class PhantomxThesisEnv(DirectRLEnv):
                 self._commands[env_ids, 2] = torch.zeros_like(
                     self._commands[env_ids, 2]
                 ).uniform_(-max_yaw, max_yaw)
+
+    def _apply_terrain_curriculum(self, env_ids: torch.Tensor):
+        """Stuft Envs anhand der in der gerade beendeten Episode zurückgelegten Distanz auf
+        leichtere/schwerere Terrain-Rows um (IsaacLab-Standardmuster, siehe
+        isaaclab_tasks/manager_based/locomotion/velocity/mdp/curriculums.py:terrain_levels_vel).
+
+        Muss VOR _apply_velocity_curriculum() aufgerufen werden, da self._commands an dieser
+        Stelle noch die während der beendeten Episode aktiven Kommandos enthält (move_down
+        braucht genau diese, nicht die neu zu setzenden für die kommende Episode).
+
+        No-op auf terrain_type="plane" (terrain_generator ist dann None) — Flat-Task-IDs
+        bleiben unverändert.
+
+        No-op beim allerersten Reset (common_step_counter == 0, ausgelöst durch DirectRLEnv.
+        __init__ -> self.reset(), bevor der Roboter je einen Physik-Schritt gemacht hat):
+        root_pos_w ist zu diesem Zeitpunkt noch nicht auf eine sinnvolle Pose gesetzt (Default-
+        USD-Prim-Pose, meist nahe dem Welt-Ursprung), während env_origins bei generator-Terrain
+        bereits reale, teils weit vom Ursprung entfernte Koordinaten sind (Terrain-Grid bis zu
+        ~250m). Ohne diesen Guard wird distance dadurch riesig -> move_up feuert sofort für
+        JEDE Env, noch bevor max_init_terrain_level=0 überhaupt einen Trainingsschritt bewirken
+        konnte — die Envs werden im Init-Reset direkt wieder auf zufällige, teils maximale
+        Terrain-Level hochgestuft (das beobachtete "Roboter fällt sofort beim Spawn durch den
+        Boden").
+        """
+        if self._terrain.cfg.terrain_generator is None:
+            return
+        if self.common_step_counter == 0:
+            return
+
+        distance = torch.norm(
+            self._robot.data.root_pos_w[env_ids, :2] - self._terrain.env_origins[env_ids, :2],
+            dim=1,
+        )
+        move_up = distance > self._terrain.cfg.terrain_generator.size[0] / 2
+        move_down = distance < torch.norm(self._commands[env_ids, :2], dim=1) * self.max_episode_length_s * 0.5
+        move_down &= ~move_up
+        self._terrain.update_env_origins(env_ids, move_up, move_down)
 
     def set_curriculum_step(self, step: int) -> None:
         """Override common_step_counter, z.B. um das Velocity-Curriculum nach einem Checkpoint-

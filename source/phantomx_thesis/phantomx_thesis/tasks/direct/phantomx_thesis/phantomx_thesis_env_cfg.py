@@ -47,39 +47,49 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
         ),
         # Zufälliges Rauschen - leicht uneben (20%)
         # Gut für Hexapod: simuliert Gras/Kies/unebenen Boden
+        # 0.03-0.12 -> 0.02-0.07 (~60% der vorherigen Werte, auf User-Wunsch entschärft): das
+        # 0.12-Maximum lag zu nah an target_base_height=0.11/termination_height=0.10 — Rauschen
+        # allein konnte fast die gesamte Standhöhe auffressen. 0.07 lässt spürbaren Sicherheits-
+        # abstand, bleibt aber klar uneben (>0 wie ursprünglich, kein Rückbau auf reine Ebene).
         "random_rough": hf_gen.HfRandomUniformTerrainCfg(
             proportion=0.2,
-            noise_range=(0.02, 0.08),   # Höhe der Unebenheiten in Metern
+            noise_range=(0.02, 0.07),   # Höhe der Unebenheiten in Metern
             noise_step=0.02,
             border_width=0.25,
         ),
         # Diskrete Hindernisse - Klötze/Steine (20%)
         # Herausfordernd für Hexapod: Beine müssen hochheben
+        # 0.03-0.09 -> 0.02-0.055 (~60% der vorherigen Werte, gleiche Entschärfung wie bei den
+        # Gravel-Blöcken unten, auf User-Wunsch): bleibt deutlich unter termination_height=0.10.
         "discrete_obstacles": hf_gen.HfDiscreteObstaclesTerrainCfg(
             proportion=0.2,
             obstacle_height_mode="fixed",
             obstacle_width_range=(0.05, 0.2),   # Breite der Hindernisse
-            obstacle_height_range=(0.02, 0.06), # Höhe: konservativ für Hexapod
+            obstacle_height_range=(0.02, 0.055), # Höhe: konservativ für Hexapod
             num_obstacles=60,
             platform_width=2.0,
         ),
-        # Geneigte Pyramide (20%)
-        # Trainiert Gleichgewicht auf Schrägen
-        "pyramid_slope": hf_gen.HfPyramidSlopedTerrainCfg(
+        # Feiner Gravel/Kies (20%) — ersetzt pyramid_slope (Pyramiden auf User-Wunsch entfernt,
+        # wenig Trainingsnutzen für den Hexapod). Etwas gröber als der obere "random_rough"-Block,
+        # eigener Name nur wegen num_cols-Aufteilung (proportion) — HfRandomUniformTerrainCfg
+        # ignoriert den difficulty-Parameter (siehe IsaacLab-Doku), Differenzierung fein/grob läuft
+        # daher rein über fixe noise_range, nicht über die Curriculum-Row.
+        # 0.02-0.10 -> 0.015-0.06 (~60%, gleiche Entschärfung wie random_rough oben).
+        "gravel_fine": hf_gen.HfRandomUniformTerrainCfg(
             proportion=0.2,
-            slope_range=(0.0, 0.3),     # Neigungswinkel in rad (0.3 ≈ 17°)
-            platform_width=2.0,
+            noise_range=(0.015, 0.06),   # etwas feiner als gravel_coarse unten
+            noise_step=0.01,
             border_width=0.25,
         ),
-        # Treppenstufen (20%)
-        # Schwierigste Variante - Beine müssen klar heben
-        "pyramid_stairs": mesh_gen.MeshPyramidStairsTerrainCfg(
+        # Grober Gravel/Schotter (20%) — ersetzt pyramid_stairs (gleicher Grund wie oben).
+        # 0.05-0.12 -> 0.03-0.07 (~60%, auf User-Wunsch entschärft): bleibt spürbar gröber als
+        # gravel_fine, aber mit deutlicherem Sicherheitsabstand zu termination_height=0.10 als
+        # zuvor (0.12 lag zu nah an der Standhöhe).
+        "gravel_coarse": hf_gen.HfRandomUniformTerrainCfg(
             proportion=0.2,
-            step_height_range=(0.02, 0.08), # Stufenhöhe: klein für Hexapod
-            step_width=0.3,
-            platform_width=3.0,
-            border_width=1.0,
-            holes=False,
+            noise_range=(0.03, 0.07),   # grober/unregelmäßiger als gravel_fine
+            noise_step=0.02,
+            border_width=0.25,
         ),
     },
 )
@@ -157,10 +167,26 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     # TERRAIN - Unstrukturiertes Rough Terrain
     # =====================================================
+    # Anzahl der leichtesten Terrain-Rows, über die die Envs beim Start GLEICHMÄSSIG (nicht per
+    # torch.randint) verteilt werden — siehe _setup_scene()/_init_terrain_grid() in env.py.
+    # max_init_terrain_level=0 (Vorgänger-Fix) zwang JEDE Env auf exakt Row 0 -> alle Envs auf
+    # derselben Y-Koordinate, 29/30 Terrain-Reihen blieben leer (live beobachtet). Mit >1 Rows
+    # verteilt _init_terrain_grid() deterministisch über Rows UND Cols, bleibt aber auf niedriger
+    # Difficulty (Rows 0..init_terrain_rows-1 von 30).
+    # 3 -> 8: Row 8 entspricht difficulty=(8+η)/30≈27-30% — auf User-Wunsch spürbar unebener ab
+    # Start, bewusst noch klar unter den höchsten Rows (25-29, >80% Difficulty), damit nicht ein
+    # Teil der Envs von Anfang an auf der schwierigsten Stufe (Grund des ursprünglichen
+    # max_init_terrain_level-Fixes) landet.
+    init_terrain_rows: int = 8
+
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",           # "generator" statt "plane"
         terrain_generator=ROUGH_TERRAINS_CFG,
+        max_init_terrain_level=0,            # von _init_terrain_grid() in env.py überschrieben —
+                                              # bleibt hier nur als IsaacLab-interner Fallback/Default
+                                              # falls _init_terrain_grid() aus irgendeinem Grund
+                                              # (z.B. terrain_type="plane") übersprungen wird.
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -216,7 +242,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.11    # MP_BODY at normal standing height (~20cm above ground)
+    target_base_height = 0.08    # MP_BODY at normal standing height (~20cm above ground)
     movement_speed_x = 0.075     # 7.5 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.075 m/s)
     yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
 
@@ -257,7 +283,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # (das war die eigentliche Ursache der früheren Q-Divergenz, nicht der Scale-Wert selbst).
     # Für PPO und SAC bewusst gleich — kein separater SAC-Override mehr, um genau das
     # "stille Überschreiben"-Bugmuster von vorhin nicht zu wiederholen.
-    joint_accel_reward_scale = -1.5e-7    #2.5e-7 hat ok funktioniert
+    joint_accel_reward_scale = -3.0e-7    #2.5e-7 hat ok funktioniert
     joint_accel_clamp: float = 5.0e7    # Deckel auf sum(joint_acc²) VOR der Skalierung —
                                           # Startwert, via Episode_Reward/dof_acc_l2 beobachten.
                                           # Nach action_scale 0.5→0.75 (1.5x größere mögliche
@@ -287,7 +313,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
-    termination_height = 0.10    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
+    termination_height = 0.05    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
     termination_tilt = 0.03     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
 
 
@@ -324,7 +350,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.11
+    target_base_height = 0.04
     movement_speed_x = 0.075
     yaw_rotation_speed_x = 0.0
 
@@ -333,7 +359,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     # (siehe dortige Kommentare). Ein separater, stiller Override war zuvor die Ursache eines
     # eigenen Bugs (Config-Änderung an der Basis griff für SAC nicht).
 
-    termination_height = 0.07
+    termination_height = 0.01
 
     # lin_vel_kernel_width nochmal deutlich verengt (0.1 → 0.005): bei movement_speed_x=0.05 gab
     # 0.1 komplettem Stillstand (error=command=0.05) noch exp(-0.05²/0.1)=exp(-0.025)≈0,975 —
