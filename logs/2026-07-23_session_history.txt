@@ -1,0 +1,312 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-23
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-22_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. clip_actions:True-VERSUCH GESCHEITERT — URSACHE GEFUNDEN, FIX ZURÜCKGENOMMEN
+--------------------------------------------------------------------------------
+
+Kontext: Log 07-22 endete mit dem User-umgesetzten Fix clip_actions:True in skrl_ppo_cfg.yaml,
+als Gegenmaßnahme gegen die PPO-Std-Explosion (Nulldurchgang von entropy_loss bei σ≈0,242,
+exponentielle Beschleunigung, siehe Log 07-22 Punkt 13). Dieser Fix erforderte zusätzlich einen
+Begleit-Fix: action_space in phantomx_thesis_env_cfg.py von Integer 18 auf
+Box(low=-1.0, high=1.0, shape=(18,)) geändert, weil ein reiner Integer intern zu einer
+UNBESCHRÄNKTEN Box(-inf,inf) wird (IsaacLab spec_to_gym_space()) — mit clip_actions:True führte
+das zu "torch.clamp: At least one of 'min' or 'max' must not be None" (GaussianMixin.act()),
+da skrl's compute_space_limits() bei unbeschränktem Space None/None zurückgibt. Fix wurde
+verifiziert (skrl-Source gelesen, compute_space_limits liefert danach [-1,1]-Grenzen statt None).
+
+USER-BEOBACHTUNG (Auslöser der Neubewertung): "vor dem Action Clamping hat das hervorragend
+funktioniert, warum geht es jetzt nicht mehr?" — Training zeigte Sofort-Tod nach ~11 Steps,
+negativer Reward.
+
+URSACHENANALYSE (verifiziert gegen echte Trainingsdaten): ALLE bisherigen guten Referenzläufe,
+inkl. dem bestbewerteten PPO-Run aus dem agent_evaluation_report.txt (2026-07-21_12-16-42,
+7.0/10), liefen durchgängig mit clip_actions:false — der erste Lauf, der clip_actions:True
+überhaupt zu nutzen versuchte, war exakt der kaputte. Mechanistische Erklärung: clip_actions:True
+klemmt die Aktion VOR dem Speichern im skrl-Replay/Rollout auf [-1,1] — aber die Env klemmt in
+_pre_physics_step (strict_action_pipeline) bereits UNABHÄNGIG selbst. Die doppelte, nicht sauber
+kombinierbare Transformation verzerrt log_prob/Entropie-Gradienten gerade in der kritischen
+Anfangsphase des Trainings (erste Updates, die die zufällige Ausgangs-Policy zu einer stehenden
+Haltung bringen sollen) — Ergebnis: sofortiger Kollaps statt allmählicher Verbesserung.
+Bestätigt durch TensorBoard-Vergleich: guter Referenzlauf erreicht Episode/Total timesteps
+(mean)≈1940-1950 von 2000 möglichen, Reward≈833 bei Step 600k; kaputter Lauf blieb bei
+Episode timesteps≈11, Reward negativ (-0,37 bei Step 180k).
+
+EIGENES FEHLEREINGESTÄNDNIS: der clip_actions:True-Fix wurde in einer früheren Session
+empfohlen, aber NIE gegen einen echten Trainingslauf getestet, bevor er umgesetzt wurde — die
+Wechselwirkung mit der bereits bestehenden Env-seitigen Clamping-Pipeline wurde übersehen.
+
+FIX ZURÜCKGENOMMEN (auf User-Anweisung, beide Teile):
+  skrl_ppo_cfg.yaml: clip_actions von True zurück auf False (vom User selbst gesetzt)
+  phantomx_thesis_env_cfg.py: action_space von Box(-1,1,shape=(18,)) zurück auf Integer 18,
+    numpy/gymnasium.spaces.Box-Imports entfernt (waren nur für den Box-Fix nötig)
+  Beide Änderungen py_compile-verifiziert.
+
+
+--------------------------------------------------------------------------------
+2. entropy_loss_scale GESENKT (0.01 → 0.005) — RISIKOÄRMERE ALTERNATIVE ZU clip_actions
+--------------------------------------------------------------------------------
+
+Nach dem Fehlschlag aus Punkt 1: User bat um Ursachenanalyse ("was ist deiner Meinung nach die
+Ursache für unser Problem?") und direkt im Anschluss um Umsetzung der zweiten, schon in Log
+07-22 als risikoärmer eingestuften Gegenmaßnahme.
+
+UMGESETZT: skrl_ppo_cfg.yaml, agent.entropy_loss_scale: 0.01 → 0.005 (Kommentar ergänzt:
+Begründung + expliziter Hinweis, dass clip_actions NICHT als Gegenmaßnahme genutzt wird, da es
+mit dem Env-seitigen Clamp kollidiert — Verweis auf Punkt 1 dieser Session). py_compile-
+verifiziert. Diese Änderung greift an keiner Stelle in die Action-Pipeline ein (reiner linearer
+Skalar auf den Entropy-Bonus-Gradienten) — kollidiert daher nicht mit der in Punkt 1
+gefundenen Fehlerklasse.
+
+Neuer Trainingslauf mit dieser Config gestartet (2026-07-22_13-17-04_ppo_torch). TensorBoard-
+Verifikation bei Step 18.000: Episode timesteps (mean)=940 (steigend), Reward=400 (steigend),
+Policy/Standard deviation=0,135 (stabil, kein Explosionsmuster) — deutlich gesünderes Verhalten
+als der kaputte clip_actions-Lauf. Dieser Lauf hat WEITERHIN die aus der Vorsession reduzierte
+Roboter-Bein-Reibung (static_friction_range=(0.25,0.45)) — Reibung war NICHT die Ursache des
+Sofort-Tod-Problems aus Punkt 1, wie durch diesen sauber laufenden Vergleichslauf mit gleicher
+Reibung, aber ohne clip_actions, bestätigt (User hatte Reibung selbst als Alternativhypothese
+vorgeschlagen, per TensorBoard-Beobachtung "überlebt deutlich länger" verifiziert/widerlegt).
+
+
+--------------------------------------------------------------------------------
+3. KERNEL-BEGRIFF ERKLÄRT + KERNEL-BREITE ALS URSACHE FÜR SCHWACHES TRACKING-SIGNAL BESTÄTIGT
+--------------------------------------------------------------------------------
+
+User-Frage: was ist der "Kernel" in den Reward-Formeln genau (Verwechslungsgefahr mit
+Convolution-Kernel aus der Bildverarbeitung)? Erklärt: reine Glockenkurven-Formfunktion
+(exp(-error²/kernel_width)), kein Matrix-Filter — Begriff aus der RBF-Kernel-Terminologie
+geliehen. kernel_width bestimmt die Breite/Toleranz der Glocke.
+
+Anschlussfrage: macht es Sinn, den Kernel zu verkleinern, damit der Roboter Zielhöhe/
+Zielgeschwindigkeit eher hält? Konkret durchgerechnet (reines Python, keine Env-Änderung):
+  - Geschwindigkeit (PPO, aktuell 0,25): bei KOMPLETTEM STILLSTAND statt 0,075 m/s Ziel bleiben
+    noch 97,8% des maximalen Rewards — praktisch kein Lerndruck. Bei kernel_width=0,05 sinkt das
+    auf 89,4%, bei 0,005 (SACs Wert) auf nur 32,5%.
+  - Höhe (aktuell hartcodiert 0,02, target=0,09): bei 10% Höhenabweichung (0,081m) bleiben noch
+    99,6% Reward.
+BEWERTUNG: bestätigt, dass beide Kernel strukturell zu großzügig sind — ABER Warnung ergänzt:
+zu scharfe Kernel bergen dasselbe Risiko, das SAC historisch schon hatte (kaum Gradient über
+weite Strecken des Explorationsraums, deshalb der Bootstrap-Speed-Trick als Kompensation).
+EMPFEHLUNG (nicht umgesetzt, nur beraten): moderat verengen (z.B. 0,05 statt 0,25 für
+Geschwindigkeit), schrittweise per TensorBoard beobachten, nicht direkt auf SACs 0,005 springen.
+Angebot zur additiven Cfg-Feld-Umsetzung (separater phasenspezifischer Kernel statt bestehenden
+Wert überschreiben) gemacht, vom User NICHT angenommen — stattdessen kam die nächste Frage
+(Punkt 4) zum eigentlichen Gangart-Problem.
+
+
+--------------------------------------------------------------------------------
+4. NEUE --log_dir CLI-FLAG FÜR train.py
+--------------------------------------------------------------------------------
+
+User-Frage: kann man dem Trainingsskript einen Parameter mitgeben, der bestimmt, wohin
+gespeichert wird? Bislang nicht vorhanden — log_root_path war fest aus
+agent_cfg["agent"]["experiment"]["directory"] (YAML) + Zeitstempel zusammengesetzt.
+
+UMGESETZT: scripts/skrl/train.py
+  - Neuer optionaler Parameter --log_dir (Default None).
+  - Falls gesetzt: überschreibt log_root_path (Zeile ~239-243), der übliche
+    {timestamp}_{algorithm}_{framework}-Run-Unterordner wird weiterhin automatisch angelegt
+    (keine Kollisionsgefahr zwischen mehreren Läufen im selben --log_dir).
+  - Falls NICHT gesetzt: exakt bisheriges Verhalten (logs/skrl/<directory-aus-yaml>), keine
+    Änderung am Default.
+py_compile-verifiziert. Vorgeschlagener Nutzen: für die geplante 16-Läufe-Testmatrix (Setup
+1-4 × PPO/SAC × even/uneven, siehe Punkt 5) jeden Lauf in einem benannten statt nur
+zeitstempel-benannten Ordner ablegen.
+
+
+--------------------------------------------------------------------------------
+5. THESIS-TESTMATRIX (4 SETUPS × PPO/SAC × EVEN/UNEVEN) — ANALYSIERT UND ERGÄNZUNGSVORSCHLÄGE
+--------------------------------------------------------------------------------
+
+User legte eine Tabellen-Struktur für die Thesis vor: 4 Setups (Kombinationen aus
+Zielgeschwindigkeit 7,5/15 cm/s und Zielhöhe 110/180mm, action_scale konstant 0,75, geradeaus
+gehen), je 4 Varianten (PPO/SAC × even/uneven Terrain) = 16 geplante Läufe, mit Platzhaltern
+für "Vermutung Sim-to-Sim-Gap" / "Vermutung Sim-to-Real-Gap" pro Setup.
+
+BEFUNDE:
+  - Setup 3 und Setup 4 waren in der Vorlage IDENTISCH (beide "15cm/s, 180mm, AS 0.75") —
+    vermutlich Copy-Paste-Fehler, dem User mitgeteilt (fehlende 15cm/s+110mm-Kombination für
+    ein sauberes 2×2-Design).
+  - action_scale ist aktuell eine globale Konstante (env_cfg.py:137), nicht pro Setup ohne
+    Code-Änderung variierbar — für den User unkritisch, da er sie konstant hält.
+  - "Sim-to-Sim-Gap"-Begriff in der User-Vorlage inhaltlich unpräzise verwendet: die
+    beschriebene Vermutung ("System schwingt sich durch hohen Schwerpunkt auf") ist intrinsische
+    Trainingsstabilität, kein Simulator-zu-Simulator-Unterschied (Sim-to-Sim ist im Projekt
+    bereits für Isaac Lab↔Gazebo reserviert, siehe frühere Sessions) — Umbenennung empfohlen.
+
+Anschlussfrage: was zusätzlich ergänzen, um Unterschiede sauber auf PPO vs. SAC zurückzuführen
+(nicht auf Setup-/Konfigurationsrauschen)? Antwort strukturiert in 6 Punkten:
+  1. Störfaktoren kontrollieren: num_envs unterscheidet sich strukturell (PPO 512 vs. SAC 128)
+     — bei "gleichem" timesteps=600k sieht PPO ~4x mehr Gesamt-Env-Interaktionen. Gesamt-Env-
+     Steps (timesteps×num_envs) statt nur timesteps als Vergleichsgröße nutzen.
+  2. Sample-Efficiency (Env-Steps bis Qualitätskriterium erreicht) als eigene Metrik.
+  3. Bekannte algorithmus-intrinsische Instabilitätsmuster (PPO-σ-Explosion vs. exp(max_log_std)-
+     Deckel, SAC-Q-Divergenz/Entropie-Kollaps) systematisch pro Setup messen, nicht nur Prosa.
+  4. SACs Curriculum-Mechanismus (Bootstrap-Trick) ist strukturell verschieden von PPOs
+     Stufen-Rampe — "gleiches Ziel" bedeutet nicht "gleicher Trainingsweg dorthin", gehört als
+     expliziter Methodik-Absatz in die Thesis.
+  5. Reward-Cfg-Unterschiede zwischen PPO-/SAC-Klasse (lin_vel_kernel_width, clamp_reward etc.)
+     vor jedem Ergebnisvergleich explizit ausschließen/dokumentieren.
+  6. Konkrete zusätzliche Tabellenspalten vorgeschlagen: Gesamt-Env-Steps, Wall-Clock-Zeit,
+     σ-Explosion/Q-Divergenz aufgetreten?, gemessene (nicht nur Ziel-) avg_forward_speed_mps/
+     avg_body_height_m, Episodenlänge bei Trainingsende, Reward-Konfiguration abweichend?.
+
+Auf Anfrage: alle Informationen zu PPO/SAC (Architektur, Hyperparameter, bekannte
+Instabilitätsmuster, Kernel-Hintergrund, obige Metriken-Gedanken) als zusammenhängender
+Referenz-Prompt zusammengefasst — NUR im Scratchpad abgelegt
+(/tmp/.../scratchpad/ppo_sac_analysis_prompt.md), kein Projekt-Artefakt.
+
+
+--------------------------------------------------------------------------------
+6. GANGART-PROBLEM: "ZUCKELN MIT TIBIAS" STATT SAUBERER SCHWUNGPHASE — PLAN + UMSETZUNG
+--------------------------------------------------------------------------------
+
+User-Beobachtung: Roboter stellt sich in eine Standhaltung und zuckelt dann nur mit minimalen
+Tibia-Bewegungen, statt eine saubere Schwungphase (Bein anheben, vorschwingen) und Standphase
+(aufsetzen, Körper vorwärts schieben) zu zeigen. Frage: Untergrund anpassen? Extra Reward?
+Bestehenden Reward ändern?
+
+ANALYSE (Explore-Agent + eigene Verifikation): KEIN bestehender Reward-Term erfasst Fußhöhe
+während der Schwungphase oder Schwungphasen-Timing — foot_contact/tripod_gait sind reine
+Kontakt-Booleans, lazy_legs bestraft nur EXTREM lange Luftzeit (>3s), nicht "zu kurzes/zu
+flaches" Zucken. Aktuator-Pipeline hat kein mechanisches Anheben-Limit (Femur identisch zu
+Coxa/Tibia parametrisiert, phantomx.py) — reines Reward-Design-Problem, kein Hardware-Limit.
+discrete_obstacles-Terrain (bereits vorhanden, "Beine müssen hochheben"-Kommentar) allein würde
+das nicht zuverlässig lösen, da ohne begleitenden Reward kein Anreiz besteht, Hindernisse SAUBER
+statt "irgendwie" zu überwinden.
+
+HISTORISCHE ALTLAST GEPRÜFT: ein sehr ähnlicher Term (femur_flip_penalty) existierte bereits
+einmal (12. Juli), wurde aber wieder entfernt. Per Git-Show/Session-Log-Recherche präzisiert:
+war KEIN bewiesener Trainingsschaden (ursprünglicher Q-Divergenz-Verdacht wurde durch Debug-
+Messung widerlegt, Term war im finalen guten Lauf ohnehin bei Null) — Entfernung eher
+"Aufräumen ohne Restwirkung". Neuer Ansatz strukturell anders begründet: Zustandsgröße
+(Fußposition relativ Terrain) statt starrer Gelenkwinkel-Schwelle, positiver statt negativer
+Anreiz, unabhängig von der konkreten Default-Pose.
+
+PLAN erstellt (Plan-Mode, 2 Explore-Agenten + 1 Plan-Agent) und in
+/root/.claude/plans/k-nnen-wir-seitwertsbewegungen-trainiere-calm-church.md als neuer,
+vorangestellter Abschnitt gespeichert (alter Strafing/Kurven-Plan bleibt darunter unverändert
+erhalten). Empfehlung: NUR Fußhöhen-Bonus während Schwungphase (nicht zusätzlich
+Schwungphasen-Dauer-Bonus — zwei überlappende neue Terme gleichzeitig würden Fehlerzuordnung
+erschweren). Terrain-Anpassung bewusst ZURÜCKGESTELLT (Reward zuerst, Terrain erst danach in
+Folge-Session). Additiv eingeführt (Scale=0.0 Default, analog joint_accel_reward_scale-Muster).
+User bestätigte per AskUserQuestion: erst Scale=0 beobachten, dann aktivieren (nicht direkt
+scharf schalten). Plan genehmigt (ExitPlanMode), Umsetzung im Anschluss direkt durchgeführt.
+
+UMGESETZT:
+  phantomx_thesis_env_cfg.py (Basisklasse): neue Felder swing_foot_height_target=0.02,
+    swing_foot_height_reward_scale=0.0 (deaktiviert), direkt nach dem lazy_leg_penalty-Block.
+  phantomx_thesis_env.py __init__: neuer self._tibia_robot_body_ids-Tensor (Robot-Namespace,
+    body_pos_w-Z-Auslesung für die sechs Tibia-Enden).
+  phantomx_thesis_env.py _get_rewards(): neue Formel — Fußhöhe über Terrain, NUR während
+    Schwungphase (Kontakt=False), geclippt auf [0, swing_foot_height_target] (Deckelung
+    zwingend gegen übertriebenes Anheben, min=0 schützt gegen Terrain-Rauschen).
+  Neuer "swing_foot_height"-Key im _episode_sums-Dict.
+
+WICHTIGER FUND WÄHREND DER VERIFIKATION (ging über den Plan-Scope hinaus): der Plan hatte
+fälschlich behauptet, find_bodies() liefere bei identischer Namensliste automatisch identische
+Reihenfolge zwischen ContactSensor- und Robot-Articulation-Namespace. Gegen den echten
+IsaacLab-Quellcode (resolve_matching_names(), isaaclab/utils/string.py) verifiziert: das stimmt
+NUR mit explizitem preserve_order=True — der Default (False) sortiert nach der INTERNEN
+Reihenfolge des jeweiligen Namespace, nicht nach der Abfrageliste. Das URDF deklariert die
+Tibia-Links zudem in der Reihenfolge rf,rm,rr,lf,lm,lr, nicht lf,lm,lr,rf,rm,rr, wie es der
+bestehende _TRIPOD_A/_TRIPOD_B-Kommentar ("order: lf=0,lm=1,lr=2,rf=3,rm=4,rr=5") voraussetzt.
+
+FIX (eigener Code): self._tibia_robot_body_ids und ein neuer, separater
+self._swing_contact_body_ids-Tensor (ContactSensor-Namespace) nutzen BEIDE explizit
+preserve_order=True — die neue swing_foot_height-Formel verwendet bewusst NICHT das bestehende
+foot_contact_bool/self._die_body_ids, sondern eine eigene, unabhängig order-sichere
+Kontaktabfrage (swing_contact_forces/swing_contact_bool), um garantiert korrekt zu sein,
+UNABHÄNGIG davon ob der Verdacht beim Altcode real ist.
+
+BESTANDSBUG-VERDACHT NICHT BEHOBEN, NUR DOKUMENTIERT: self._die_body_ids (seit Projektbeginn,
+genutzt für foot_contact/tripod_gait/lazy_legs/Termination) setzt preserve_order NICHT — ob
+_TRIPOD_A/_TRIPOD_B dadurch tatsächlich falsch zugeordnet sind, konnte in dieser Sandbox NICHT
+verifiziert werden (kein CUDA, kein pxr-Modul, USD-Datei binär im PXR-USDC-Crate-Format,
+body_names kommt erst zur Laufzeit aus body_physx_view.prim_paths). Per AskUserQuestion
+geklärt: User wählte "live prüfen" — Versuch unternommen (isaaclab.utils.string.py isoliert
+importiert, resolve_matching_names mit synthetischen Gegenbeispielen getestet, das bestätigte
+NUR den allgemeinen Mechanismus, nicht die tatsächliche ContactSensor-Reihenfolge dieses
+konkreten Roboters), dann als in dieser Sandbox technisch unmöglich identifiziert. Zweite
+Rückfrage: User wählte "meinen neuen Code korrekt machen, Altcode unangetastet lassen" (nicht
+"beides fixen") — genau so umgesetzt.
+
+VERIFIKATION:
+  py_compile auf beide geänderte Dateien: fehlerfrei.
+  7 isolierte Arithmetik-Testfälle (reines Python/torch, synthetische Tensoren): Standphase→0
+  Reward, exakte Zielhöhe→korrekter Wert, Überschreitung→korrekt gedeckelt (nicht linear
+  weiter), Kontakt trotz Höhe→kein Bonus, negative Terrain-Rausch-Höhe→durch min=0
+  abgefangen, Scale=0→komplett wirkungslos (Default-Zustand bestätigt), Scale=3.0→plausible
+  Größenordnung (Einzelbeitrag pro Fuß kleiner als height_reward-Maximum, aber additiv über
+  bis zu 6 gleichzeitig schwingende Beine). Alle 7 Fälle bestanden.
+
+
+--------------------------------------------------------------------------------
+7. GEÄNDERTE/NEUE DATEIEN DIESER SESSION
+--------------------------------------------------------------------------------
+
+Geändert:
+  source/.../agents/skrl_ppo_cfg.yaml
+    -> clip_actions: True -> False zurückgenommen (Punkt 1, vom User selbst gesetzt)
+    -> entropy_loss_scale: 0.01 -> 0.005 (Punkt 2)
+  source/.../phantomx_thesis_env_cfg.py
+    -> action_space: Box(-1,1,shape=(18,)) zurück auf Integer 18, Box/numpy-Imports entfernt
+       (Punkt 1)
+    -> neue Felder swing_foot_height_target/swing_foot_height_reward_scale (Punkt 6)
+  source/.../phantomx_thesis_env.py
+    -> neuer self._tibia_robot_body_ids-Tensor (Robot-Namespace, preserve_order=True) (Punkt 6)
+    -> neuer self._swing_contact_body_ids-Tensor (ContactSensor-Namespace,
+       preserve_order=True) (Punkt 6)
+    -> neue swing_foot_height-Formel in _get_rewards() + neuer _episode_sums-Key (Punkt 6)
+  scripts/skrl/train.py
+    -> neuer --log_dir CLI-Parameter (Punkt 4)
+
+Neu:
+  logs/2026-07-23_session_history.txt (dieser Log)
+
+Nur Scratchpad (kein Projekt-Artefakt):
+  ppo_sac_analysis_prompt.md — vollständiger PPO/SAC-Referenz-Prompt (Punkt 5)
+
+Plan-Datei aktualisiert:
+  /root/.claude/plans/k-nnen-wir-seitwertsbewegungen-trainiere-calm-church.md — neuer
+  swing_foot_height-Plan als vorangestellter Abschnitt ergänzt (Punkt 6), alter
+  Strafing/Kurven-Plan unverändert darunter erhalten. Ein vom Sub-Agent versehentlich
+  erzeugter zusätzlicher Plan-Dateipfad wurde entdeckt und wieder gelöscht (nur die eine
+  autorisierte Plan-Datei darf existieren).
+
+
+--------------------------------------------------------------------------------
+8. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. swing_foot_height_reward_scale weiterhin bei 0.0 — Rohwert (Episode_Reward/swing_foot_height)
+   unter dem aktuellen Verhalten beobachten, dann auf einen aktiven Testwert (empfohlen: 3.0)
+   setzen und einen vollen Lauf fahren. Parallel dof_acc_l2/action_rate_l2/dof_torques_l2/
+   avg_forward_speed_mps/lazy_legs beobachten (Zielkonflikt-Risiko: dof_acc_l2 steht aktuell auf
+   Scale 0.0, also keine aktive Beschleunigungs-Bremse — Risiko für "Stampfen" bei zu hohem
+   Scale, siehe Plan-Datei Abschnitt 7).
+2. WICHTIG, NEU GEFUNDEN: Verdacht auf einen möglichen Bestandsbug in self._die_body_ids
+   (ohne preserve_order=True) und dadurch potenziell falsch zugeordnete _TRIPOD_A/_TRIPOD_B-
+   Indizes — auf einer GPU-fähigen Maschine mit laufendem Isaac Sim verifizieren, z.B. per
+   print(self._contact_sensor.body_names) direkt nach Sim-Start. Falls real: würde tripod_gait
+   (und foot_contact/lazy_legs, dort aber unkritisch da nur summiert/gezählt, keine
+   Positions-Semantik) seit Projektbeginn ein falsches Signal geben. NICHT von dieser Session
+   behoben, bewusst nur dokumentiert.
+3. entropy_loss_scale=0.005-Fix (Punkt 2) weiter über einen längeren Lauf beobachten — bisher
+   nur bis Step 18k verifiziert (gesund), Vergleich gegen die 0.01-Baseline
+   (2026-07-22_10-03-15_ppo_torch) bei größeren Step-Zahlen noch ausstehend.
+4. Kernel-Verengung (Punkt 3) weiterhin nur beraten, nicht umgesetzt — Angebot zur additiven
+   Cfg-Feld-Lösung steht, falls gewünscht.
+5. Thesis-Testmatrix (Punkt 5): Setup 3/4-Duplikat noch nicht vom User korrigiert, zusätzliche
+   Tabellenspalten-Vorschläge noch nicht in die tatsächliche Tabelle übernommen.
+6. Alle aus Log 07-22 bereits offenen Punkte, die hier nicht explizit behandelt wurden, bleiben
+   unverändert offen (Strafing/Kurven-Plan weiterhin nicht umgesetzt, target_base_height/
+   Height-Kernel-Mismatch, externe Reward-Konflikt-Analyse ungeklärt, kein Git-Commit über den
+   weiterhin wachsenden uncommitteten Stand).
+
+================================================================================

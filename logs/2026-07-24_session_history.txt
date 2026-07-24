@@ -1,0 +1,319 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-24
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-23_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. FRAGE ZU swing_foot_height_target — EINHEIT GEKLÄRT
+--------------------------------------------------------------------------------
+
+User-Frage: swing_foot_height_target=0.02 in mm oder cm? Bestätigt: Meter (0.02 m = 2 cm) —
+konsistent zur durchgängigen Projekt-Konvention (target_base_height, movement_speed_x, alle
+Terrain-noise_range-Werte ebenfalls in Metern). Zur Einordnung: 2 cm liegt deutlich unter der
+discrete_obstacles-Maximalhöhe (5.5 cm) — bewusst als vorsichtiger erster Schritt, nicht um
+Terrain-Hindernisse zu überwinden.
+
+
+--------------------------------------------------------------------------------
+2. Episode_Reward/swing_foot_height=0.13 — BEDEUTUNG ERKLÄRT, EIGENE FEHLEINSCHÄTZUNG KORRIGIERT
+--------------------------------------------------------------------------------
+
+User fragte, was ein beobachteter Wert von 0.13 über die tatsächliche Fußhöhe aussagt.
+Zurückgerechnet (Episode_Reward-Normierung durch step_dt/max_episode_length_s kürzt sich bei
+konstanter Rate heraus, vereinfacht zu raw_mean_per_step = observed/scale): bei scale=3.0 ergab
+sich ein geschätzter Rohwert von ~43mm Summe über alle schwingenden Füße, je nach Annahme der
+Anzahl gleichzeitig schwingender Füße zwischen ~11mm und ~43mm pro Fuß. Wichtiger Befund:
+Reward-Wert allein lässt wegen der Deckelung (max 0.02m pro Fuß) und Summation über 6 Füße
+NICHT eindeutig auf die tatsächliche Höhe schließen — Vorschlag einer zusätzlichen, ungedeckelten
+Metrics/avg_swing_foot_height_mm (analog avg_forward_speed_mps) gemacht, vom User nicht
+angenommen (Frage ging stattdessen weiter zum Curriculum-Timing, siehe Punkt 3).
+
+
+--------------------------------------------------------------------------------
+3. AB WANN STARTET swing_foot_height? EIGENE FEHLANNAHME DURCH USER-DATEN WIDERLEGT
+--------------------------------------------------------------------------------
+
+User-Frage: greift swing_foot_height ab Step 0 oder erst ab 100k (Curriculum-Start für
+Bewegungskommandos)? Antwort zunächst korrekt: KEIN Bezug zu common_step_counter im Code, Term
+läuft unbedingt ab Step 0. Eigene Fehleinschätzung dabei: angenommen, der Roboter würde vor
+100k praktisch "stillstehen" (commands=0), daher swing_foot_height nahe 0 in dieser Phase.
+
+USER WIDERLEGTE DAS MIT ECHTEN DATEN: swing_foot_height lag bereits bei Step 48k-96k
+konstant bei ~0.11-0.12, nicht nahe 0 (Lauf 2026-07-23_18-43-30_ppo_torch analysiert). Per
+TensorBoard-Auswertung bestätigt und korrekt neu eingeordnet: "commands=0" bedeutet nur "kein
+Bewegungsziel", NICHT "keine Beinbewegung" — der Roboter lernt in dieser Phase aktiv zu STEHEN
+(Balance, Gewichtsverlagerung), was selbst schon Beinwechsel/Schwungphasen erzeugt.
+foot_contact stieg im selben Fenster von 0.007 auf 0.91, tripod_gait von 0.003 auf 1.20 —
+konsistent mit aktiver Standbein-Koordination statt Regungslosigkeit. Eigener Fehler explizit
+eingeräumt und korrigiert.
+
+
+--------------------------------------------------------------------------------
+4. REIBUNG AUF "GUMMISTOPPER AUF GLATTEM PARKETT" ANGEPASST
+--------------------------------------------------------------------------------
+
+Hardware-Update des Users: Gummistopper auf die Tibia-Spitzen montiert, Zielumgebung glattes
+Parkett statt Holzboden. Reibung war zuvor auf PLA-auf-Holz kalibriert
+(static 0.25-0.45 / dynamic 0.2-0.35, EventCfg.physics_material). Per AskUserQuestion drei
+Optionen vorgelegt (leicht/moderat/stark erhöht), User wählte moderat.
+
+UMGESETZT: phantomx_thesis_env_cfg.py, EventCfg.physics_material:
+  static_friction_range:  (0.25, 0.45) -> (0.4, 0.6)
+  dynamic_friction_range: (0.2, 0.35)  -> (0.35, 0.5)
+Kommentar aktualisiert (Hardware-Kontext dokumentiert). Da EventCfg nur EINMAL instanziiert und
+von allen 4 Env-Klassen (PPO/SAC x even/uneven) geerbt wird — vorher verifiziert, keine
+versteckten Overrides — gilt die neue Reibung automatisch für alle 4 Varianten, exakt wie bei
+der realen Hardwareänderung (Gummistopper an allen Beinen). py_compile-verifiziert.
+
+Vorab (auf explizite Nachfrage) auch bestätigt: Boden-Reibung (mu=1.0 überall) UND
+Roboter-Bein-Reibung sind für alle 4 Varianten identisch — kein versteckter Unterschied
+zwischen PPO/SAC oder even/uneven, da EventCfg zentral in der PPO-Basisklasse gesetzt wird und
+kein Override existiert.
+
+
+--------------------------------------------------------------------------------
+5. joint_accel_reward_scale — VORZEICHEN-VERWIRRUNG NACHVOLLZOGEN (KEIN AKTIVER BUG)
+--------------------------------------------------------------------------------
+
+User fragte zur Formel-Semantik: bestraft joint_accel_reward_scale alle Gelenkbeschleunigungen
+oder erst ab Schwellenwert? Erklärt: quadratische Strafe OHNE Totzone
+(sum(square(joint_acc)), gedeckelt nach OBEN via joint_accel_clamp gegen Physik-Ausreißer, kein
+unterer Schwellenwert — jede noch so kleine Beschleunigung trägt quadratisch klein bei).
+
+Im Rahmen einer vorherigen Session-Analyse (siehe Log 07-23) war aufgefallen, dass der Wert
+zwischenzeitlich positiv (2.5e-7) statt negativ war, was die Strafe in eine Belohnung
+verkehrt hätte — TensorBoard-Verifikation zeigte aber, dass der konkret analysierte Lauf
+(2026-07-23_18-43-30) mit dem damals korrekten Scale=0.0 lief (Feld war zwischen Laufstart und
+späterer Analyse geändert worden, Python liest Cfg nur beim Prozessstart). User hatte den Wert
+im Verlauf dieser Session bereits mehrfach selbst angepasst (zwischen 0.0, -5e-7, wieder 0.0).
+
+
+--------------------------------------------------------------------------------
+6. USER-THESE: joint_accel-STRAFE FÜHRT ZU "STABILSTE KONSTELLATION FINDEN + NUR TIBIA
+   ZUCKEN" — TIEFENANALYSE
+--------------------------------------------------------------------------------
+
+User-Beobachtung (live in der Sim): Roboter sucht sich eine stabile Gelenkkonstellation, verharrt
+dort, bewegt nur noch die Tibias. These: joint_accel_reward_scale (quadratisch, ohne Totzone)
+bestraft JEDE Bewegung und fördert dadurch unbewusst genau dieses Ausharr-Verhalten.
+
+ANALYSE (vollständiger Reward-Scale-Stand zum Zeitpunkt der Frage abgeglichen — hatte sich
+erneut geändert: action_rate_reward_scale -0.02->-0.05, tripod_gait_reward_scale 2.0->3.0,
+joint_accel_reward_scale zurück auf 0.0):
+  - BESTÄTIGT (Teilthese): die Grundmechanik ist real — quadratische Straf-Formel ohne
+    Totzone erzeugt strukturell einen Anreiz, Bewegung zu minimieren, wenn der Bewegungsnutzen
+    den Strafbeitrag nicht klar übersteigt (bekanntes generisches RL-Reward-Design-Risiko).
+  - WIDERLEGT (konkrete mechanistische Erklärung): joint_acc ist reine Winkelbeschleunigung
+    (rad/s², aus (joint_vel-previous_joint_vel)/time_elapsed), UNABHÄNGIG von Masse/Hebelarm des
+    jeweiligen Gelenks — URDF-Massen aller Beinsegmente sind zudem identisch (0.0244 überall
+    außer MP_BODY). Es gibt KEINEN eingebauten Coxa/Femur-vs-Tibia-Bias in der Formel selbst —
+    falls die Policy bevorzugt Tibia bewegt, liegt die Ursache eher in swing_foot_height selbst
+    (das spezifisch Tibia-Position belohnt), nicht in dof_acc_l2.
+  - TEILWEISE WIDERSPROCHEN durch echte Daten: jüngster verfügbarer Lauf mit aktivem, korrekt
+    negativem joint_accel_reward_scale=-5e-7 (SAC, 2026-07-23_22-17-12) zeigt KEIN
+    Stagnations-Muster — tripod_gait steigt kontinuierlich auf 1.93, avg_forward_speed_mps
+    erreicht 0.076 m/s (nahe Ziel), foot_contact bei 0.99. Wichtiger Vorbehalt: dieser Lauf
+    hatte noch action_rate_reward_scale=-0.02, nicht den späteren -0.05-Stand — die
+    Live-Beobachtung des Users könnte mit einem neueren, nicht geloggten Checkpoint gemacht
+    worden sein, bei dem BEIDE Bremsterme (action_rate UND joint_accel) gleichzeitig verschärft
+    waren.
+  - Hypothese: zwei gleichzeitig verschärfte, strukturell ähnliche Bremsterme (action_rate_l2
+    UND dof_acc_l2, beide ohne Totzone) könnten sich kumulativ zu einem staerkeren
+    Netto-Effekt addieren als einzeln vorhergesehen — in früheren Sessions bereits als
+    generelle Lehre festgehalten ("nicht mehrere Variablen gleichzeitig ändern").
+
+OPTIONEN VORGESTELLT (keine umgesetzt):
+  A) Totzone/Deadband in dof_acc_l2 einführen (relu(joint_acc²-threshold))
+  B) Scale-Verhältnis explizit gegen Bewegungsanreize gegenrechnen statt unabhängig hochsetzen
+  C) Nur einen der beiden Bremsterme (action_rate ODER joint_accel) verschärfen, nicht beide
+     gleichzeitig, um Einzeleffekte zu isolieren
+  D) swing_foot_height gegen "nur Tibia bewegen" absichern (Vorgriff auf Punkt 7)
+
+
+--------------------------------------------------------------------------------
+7. STRATEGIE FÜR "LANGSAMERE, GRÖSSERE BEWEGUNGEN" ENTWICKELT — 4 OPTIONEN
+--------------------------------------------------------------------------------
+
+Anschlussauftrag: bewusst langsamere UND dadurch größere Bewegungen fördern (nicht nur Zuckeln
+bestrafen). Vier komplementäre Hebel entwickelt:
+  1. Jerk-Penalty (3. Ableitung, Δjoint_acc/Δt) — trifft abrupte Oszillationen direkter als
+     bestehende Terme, braucht neuen State (_previous_joint_acc).
+  2. Wechselzahl-/Oszillations-Penalty über Zeitfenster (Vorzeichenwechsel von joint_vel
+     zählen) — direktestes Frequenz-Maß, aber aufwendigster State-Bedarf (Ringbuffer).
+  3. Amplitude-über-Zeitfenster-Bonus (max-min von joint_pos über N Steps, positiv statt nur
+     Bremse) — direkte Weiterentwicklung der in Log 07-16 diskutierten, nie entschiedenen
+     "Option b: Action-Amplitude-Bonus", jetzt zeitfenster- statt pro-Step-basiert.
+  4. Mindest-Schwungdauer an bestehenden swing_foot_height-Reward koppeln (last_air_time-Feld,
+     bereits als ungenutzt identifiziert seit dem ursprünglichen swing_foot_height-Plan).
+
+EMPFEHLUNG: Kombination aus Option 3 (primärer, positiver Hebel) + Option 4 (Ergänzung
+bestehender Infrastruktur) — bewusst NICHT nur weitere Bremsen (Option 1/2), um das in Punkt 6
+diskutierte Risiko (immer mehr Bremsen kumulieren zu "am billigsten ist Stillstand") nicht zu
+verschärfen.
+
+User entschied sich für Option 4, mit konkretem Schwellenwert-Vorschlag (~0.5s Mindestdauer).
+
+
+--------------------------------------------------------------------------------
+8. swing_quality_bonus — GEPLANT UND UMGESETZT (Höhe UND Dauer kombiniert)
+--------------------------------------------------------------------------------
+
+Auf Nachfrage präzisiert: Dauer-Bonus soll AN die Höhe GEKOPPELT sein (kombiniertes Kriterium,
+nicht unabhängig) — Bonus nur wenn eine Schwungphase BEIDE Bedingungen gleichzeitig erfüllt.
+
+DESIGN (vor Umsetzung erläutert, dann exakt so implementiert):
+  - Kontinuierlicher Teil (bestehendes swing_foot_height) bleibt unverändert als dichtes
+    Gradientensignal während der Schwungphase.
+  - NEUER, zusätzlicher binärer Abschluss-Bonus: wird nur im exakten Touchdown-Step ausgezahlt
+    (Übergang Schwung->Kontakt), NICHT proportional/kontinuierlich — bewusst um keinen Anreiz zu
+    endlosem Herumschweben zu schaffen (analoges Risiko wie beim ursprünglichen
+    swing_foot_height-Deckelungs-Prinzip).
+  - Peak-Höhen-Tracking über die GESAMTE Schwungphase nötig (nicht nur der Touchdown-Moment-Wert),
+    da last_air_time nur Dauer liefert, keine Höheninformation — neuer persistenter State.
+
+UMGESETZT:
+  phantomx_thesis_env_cfg.py (Basisklasse, direkt nach swing_foot_height_reward_scale):
+    swing_foot_duration_target: float = 0.5   (s, Startwert, unverifiziert)
+    swing_quality_bonus_scale: float = 0.0    (deaktiviert per Default, gleiches
+                                                Vorsichtsprinzip wie swing_foot_height)
+
+  phantomx_thesis_env.py __init__ (nach self._swing_contact_body_ids):
+    self._swing_peak_height = torch.zeros(num_envs, 6)          — Peak-Tracking pro Fuß
+    self._previous_swing_contact_bool = torch.zeros(..., bool)  — für Touchdown-Erkennung
+
+  phantomx_thesis_env.py _reset_idx() (bei den bestehenden Actions/has_stood_up-Resets):
+    self._swing_peak_height[env_ids] = 0.0
+    self._previous_swing_contact_bool[env_ids] = False
+
+  phantomx_thesis_env.py _get_rewards() (direkt nach der bestehenden swing_foot_height-Formel):
+    1. Peak-Höhe pro Fuß laufend aktualisieren (torch.maximum, NUR während swing_mask==True,
+       raw/ungeclippt — anders als der gedeckelte swing_foot_height-Wert, hier zählt der echte
+       Peak für den Schwellenvergleich)
+    2. just_landed = swing_contact_bool & ~previous_swing_contact_bool (Touchdown-Erkennung)
+    3. height_ok = peak >= swing_foot_height_target, duration_ok = last_air_time >=
+       swing_foot_duration_target (last_air_time: bisher ungenutztes ContactSensor-Feld,
+       track_air_time=True war bereits aktiv)
+    4. swing_quality_bonus = sum(just_landed * height_ok * duration_ok) — binär, pro Env
+    5. Peak wird bei just_landed auf 0 zurückgesetzt (nächste Phase startet sauber)
+    Neuer Dict-Eintrag "swing_quality_bonus", neuer _episode_sums-Key.
+  Nutzt konsequent die bereits im vorherigen swing_foot_height-Fix etablierte, order-sichere
+  Infrastruktur (self._swing_contact_body_ids/self._tibia_robot_body_ids, beide mit
+  preserve_order=True) — kein neuer Namespace-Risiko-Punkt.
+
+VERIFIKATION:
+  py_compile auf beide Dateien: fehlerfrei.
+  Isolierte Arithmetik-Verifikation (reines Python/torch, synthetische Step-Sequenzen):
+    - Erster Testlauf hatte einen Fehler in EIGENEM Testskript (Python global-Scoping-Bug bei
+      der State-Update-Reihenfolge zwischen Testschritten) — NICHT in der eigentlichen
+      Env-Formel. Sauber nachgebaut (State-Update innerhalb einer einzigen durchlaufenden
+      Funktion statt globaler Variablen) und alle 5 Szenarien erneut geprüft:
+      1. Sauberer Schritt (0.6s Dauer, Peak 0.029m > 0.02m Ziel) -> bonus=1.0 (korrekt)
+      2. Zu kurz (0.1s, aber hoch genug) -> bonus=0.0 (Dauer-Kriterium korrekt verletzt)
+      3. Zu flach (0.6s, aber max 0.0145m < 0.02m) -> bonus=0.0 (Höhen-Kriterium korrekt
+         verletzt)
+      4. Peak wird über Zwischenabfall hinweg korrekt gehalten (Fuß geht vor Touchdown wieder
+         runter, Peak bleibt bei seinem Maximalwert) -> bonus=1.0 (korrekt)
+      5. Zwei aufeinanderfolgende Schwungphasen (erst kurz+niedrig, dann sauber) -> kein
+         State-Leck zwischen den Phasen, jede Phase wird unabhängig korrekt bewertet
+    Alle 5 Szenarien bestanden nach Korrektur des Testskripts.
+
+
+--------------------------------------------------------------------------------
+8.1 NACHTRÄGLICHE VERIFIKATION DER swing_quality_bonus-UMSETZUNG (Konsistenz-Check)
+--------------------------------------------------------------------------------
+
+User fragte explizit nach, ob alles "so umgesetzt ist, dass es passt". Vollständiger Re-Read
+beider Dateien (env.py __init__/_reset_idx/_get_rewards, env_cfg.py Cfg-Block) plus erneuter
+py_compile-Lauf durchgeführt:
+  - __init__: State-Anlage, order-sichere Body-ID-Tensoren, _episode_sums-Key — korrekt.
+  - _reset_idx(): beide neuen State-Tensoren werden korrekt vor _apply_velocity_curriculum
+    zurückgesetzt, analog zu den bestehenden Resets.
+  - _get_rewards(): Reihenfolge der 4 Formel-Schritte verifiziert als race-frei — insbesondere
+    bestätigt, dass bei just_landed==True der swing_mask in genau diesem Step bereits False ist
+    (Fuß hat wieder Kontakt), wodurch der Peak-Update-Schritt (1) den Peak für diesen Fuß nicht
+    mehr verändert, BEVOR er in Schritt 3 ausgewertet und in Schritt 4 zurückgesetzt wird — keine
+    Off-by-one-Race zwischen Auswertung und Reset im selben Step.
+  - py_compile erneut fehlerfrei auf beiden Dateien.
+
+GEFUNDENER UND BEHOBENER FEHLER (Kommentar, kein Logik-Bug): swing_foot_height_reward_scale
+stand bereits auf 3.0 (User hatte den Wert selbst von 0.0 aktiviert), der danebenstehende
+Kommentar sagte aber noch "DEAKTIVIERT per Default" — ein stehengebliebener Rest aus der
+ursprünglichen Plan-Phase. Kommentar korrigiert auf den tatsächlichen Zustand ("AKTIVIERT,
+erster Testwert"). Kein Verhaltens-Unterschied, nur Doku-Korrektur.
+
+
+--------------------------------------------------------------------------------
+8.2 swing_quality_bonus_scale — WERT-EMPFEHLUNG (User hatte selbst 3.0 gesetzt)
+--------------------------------------------------------------------------------
+
+User hatte swing_quality_bonus_scale bereits eigenständig von 0.0 auf 3.0 gesetzt (Kommentar
+dort ebenfalls noch "DEAKTIVIERT" — gleicher Rest-Kommentar-Typ wie oben, User-Frage bezog sich
+auf die Werthöhe, nicht auf den Kommentar).
+
+ANALYSE: swing_quality_bonus ist STRUKTURELL ANDERS als swing_foot_height — binär (0/1 pro Fuß),
+nur EINMAL pro Schwungzyklus ausgezahlt (im exakten Touchdown-Step), während swing_foot_height
+UND alle anderen etablierten Terme (movement_penalty_scale=15.0, tripod_gait_reward_scale=3.0)
+bei JEDEM Step wirken. Ein direkter Scale-Zahlenvergleich zwischen einem Einmal-pro-Zyklus-Bonus
+und einem Pro-Step-Term ist daher irreführend — bei ~25 Steps pro Schwungzyklus (0.5s Mindestdauer
+bei step_dt≈0.02s) entspricht Scale=3.0 effektiv nur einem Pro-Step-Scale von ca. 0.12, deutlich
+kleiner als die übrigen aktiven Terme und vermutlich zu schwach, um im Rauschen der anderen
+Reward-Komponenten sichtbar zu wirken.
+
+EMPFEHLUNG (Analyse, keine Umsetzung): 10.0-15.0 als ersten Testwert statt 3.0, um in der
+Größenordnung von movement_penalty_scale/tripod_gait_reward_scale zu liegen. Wie bei
+swing_foot_height: am Rohwert (Episode_Reward/swing_quality_bonus) kalibrieren, nicht raten.
+Konkrete Umsetzung (Werteänderung) vom User noch nicht in Auftrag gegeben — Empfehlung bislang
+rein beratend, Cfg-Wert bleibt bei den vom User selbst gesetzten 3.0.
+
+
+--------------------------------------------------------------------------------
+9. GEÄNDERTE DATEIEN DIESER SESSION
+--------------------------------------------------------------------------------
+
+Geändert:
+  source/.../phantomx_thesis_env_cfg.py
+    -> EventCfg.physics_material: Reibung auf Gummi-auf-Parkett angepasst (Punkt 4)
+    -> neue Felder swing_foot_duration_target/swing_quality_bonus_scale (Punkt 8)
+  source/.../phantomx_thesis_env.py
+    -> neuer State self._swing_peak_height/self._previous_swing_contact_bool im __init__,
+       Reset-Logik in _reset_idx(), neue swing_quality_bonus-Formel in _get_rewards(),
+       neuer _episode_sums-Key (Punkt 8)
+
+Neu:
+  logs/2026-07-24_session_history.txt (dieser Log)
+
+NICHT verändert (nur analysiert/beraten):
+  joint_accel_reward_scale/action_rate_reward_scale — User hat selbst mehrfach angepasst
+  während der Session, keine Änderung von Claude Code an diesen beiden Feldern in dieser Session.
+
+
+--------------------------------------------------------------------------------
+10. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. swing_quality_bonus_scale weiterhin bei 0.0 — Rohwert (Episode_Reward/swing_quality_bonus)
+   unter aktuellem Verhalten beobachten, dann aktivieren (kein konkreter Startwert-Vorschlag
+   bisher gemacht, analog zum swing_foot_height-Vorgehen ggf. 1.0-3.0 als ersten Test).
+2. swing_foot_duration_target=0.5s ist unverifiziert — per TensorBoard beobachten, ob das
+   überhaupt regelmäßig erreichbar ist bei aktuellem velocity_limit=0.8 rad/s, oder ob der
+   Schwellenwert zu hoch angesetzt ist (Term würde dann nie/kaum auslösen).
+3. User-These aus Punkt 6 (joint_accel fördert Stillstand) bleibt TEILWEISE ungeklärt — der
+   entscheidende Vergleichslauf (aktueller Stand: action_rate=-0.05 UND joint_accel aktiv
+   gleichzeitig) wurde noch nicht gefahren/analysiert. Empfehlung aus der Analyse: einzeln
+   testen (nur action_rate ODER nur joint_accel verschärfen), bevor beide gleichzeitig scharf
+   geschaltet werden.
+4. Optionen 1/2 aus Punkt 7 (Jerk-Penalty, Wechselzahl-Penalty) nicht umgesetzt, nur benannt —
+   nur bei Bedarf nachträglich, falls Option 3 (Amplitude-Bonus, noch nicht umgesetzt) und
+   Option 4 (jetzt umgesetzt) nicht ausreichen.
+5. Bestandsbug-Verdacht aus Log 07-23 (self._die_body_ids ohne preserve_order,
+   _TRIPOD_A/_TRIPOD_B potenziell falsch zugeordnet) weiterhin nicht auf GPU-Maschine
+   verifiziert.
+6. Alle aus Log 07-23 bereits offenen Punkte, die hier nicht behandelt wurden, bleiben
+   unverändert offen (entropy_loss_scale-Langzeit-Vergleich, Kernel-Verengung nur beraten,
+   Thesis-Testmatrix-Duplikat, kein Git-Commit über den weiterhin wachsenden uncommitteten
+   Stand).
+
+================================================================================

@@ -50,6 +50,44 @@ class PhantomxThesisEnv(DirectRLEnv):
         # MP_BODY index for height measurement (physical body, 10cm above base_link)
         self._mp_body_idx, _ = self._robot.find_bodies(["MP_BODY"])
 
+        # Tibia body indices in the ROBOT ARTICULATION namespace (self._robot.data.body_pos_w) —
+        # NOT to be confused with self._die_body_ids above, which indexes the same body NAMES but
+        # in the ContactSensor namespace (self._contact_sensor.data.*). body_pos_w cannot be
+        # indexed with self._die_body_ids — a separate call is required.
+        # preserve_order=True is REQUIRED here (and below): resolve_matching_names() with the
+        # default preserve_order=False returns names in the order they appear in the target's OWN
+        # internal body list, not in query order (verified against isaaclab/utils/string.py — the
+        # docstring is easy to misread the other way around). self._die_body_ids above does NOT
+        # set preserve_order=True, so its element order relative to this array is not guaranteed —
+        # the URDF itself declares tibia links as rf,rm,rr,lf,lm,lr, not lf,lm,lr,rf,rm,rr, and
+        # whether the ContactSensor's internal body list preserves that order (or e.g. sorts
+        # alphabetically) could not be verified in this sandbox (no CUDA/pxr available to inspect
+        # the live PhysX body view or the binary USD file). Rather than assume self._die_body_ids
+        # happens to be lf,lm,lr,rf,rm,rr-ordered, a SEPARATE, order-safe ContactSensor query is
+        # used below (self._swing_contact_body_ids) specifically for this reward.
+        self._tibia_robot_body_ids, _ = self._robot.find_bodies([
+            "tibia_lf", "tibia_lm", "tibia_lr",  # Left feet
+            "tibia_rf", "tibia_rm", "tibia_rr"   # Right feet
+        ], preserve_order=True)
+
+        # Order-safe ContactSensor-namespace counterpart to self._tibia_robot_body_ids above (same
+        # query, same preserve_order=True) — used only for the swing_foot_height reward's contact
+        # mask, kept deliberately separate from self._die_body_ids (whose ordering guarantee
+        # relative to the robot-namespace array above could not be verified, see comment above).
+        self._swing_contact_body_ids, _ = self._contact_sensor.find_bodies([
+            "tibia_lf", "tibia_lm", "tibia_lr",
+            "tibia_rf", "tibia_rm", "tibia_rr"
+        ], preserve_order=True)
+
+        # State for the swing_quality_bonus reward (coupled height+duration criterion): tracks
+        # the PEAK raw foot height reached so far during the currently ongoing swing phase per
+        # foot, and the previous step's contact status (to detect the exact touchdown step).
+        # Reset per-env in _reset_idx(), analogous to self._actions/_previous_actions.
+        self._swing_peak_height = torch.zeros(self.num_envs, 6, device=self.device)
+        self._previous_swing_contact_bool = torch.zeros(
+            self.num_envs, 6, dtype=torch.bool, device=self.device
+        )
+
         # Tripod gait indices into the 6-element foot array (order: lf=0, lm=1, lr=2, rf=3, rm=4, rr=5)
         self._TRIPOD_A = [0, 4, 2]  # lf, rm, lr
         self._TRIPOD_B = [3, 1, 5]  # rf, lm, rr
@@ -84,6 +122,8 @@ class PhantomxThesisEnv(DirectRLEnv):
                 "foot_contact",
                 "tripod_gait",
                 "lazy_legs",
+                "swing_foot_height",
+                "swing_quality_bonus",
             ]
         }
 
@@ -302,6 +342,50 @@ class PhantomxThesisEnv(DirectRLEnv):
         current_air_times = self._contact_sensor.data.current_air_time[:, self._die_body_ids]
         lazy_legs = (current_air_times > 3.0).float().sum(dim=-1)
 
+        # Swing foot height reward — belohnt Fußhöhe über Terrain NUR während der Schwungphase,
+        # geclippt auf swing_foot_height_target. Deckelung ist zwingend (kein "je höher desto
+        # besser"), sonst Anreiz zu übertriebenem Anheben; min=0.0 schützt zusätzlich gegen
+        # negative Werte durch Terrain-Rauschen.
+        # Nutzt bewusst self._swing_contact_body_ids (eigener, preserve_order=True-Query) statt
+        # dem oben berechneten foot_contact_bool/self._die_body_ids — deren Elementreihenfolge
+        # relativ zu self._tibia_robot_body_ids (Robot-Namespace) konnte in dieser Sandbox nicht
+        # verifiziert werden (siehe Kommentar im __init__). Kostet einen zusätzlichen, aber
+        # günstigen net_forces_w-Tensor-Read pro Step.
+        swing_contact_forces = self._contact_sensor.data.net_forces_w[:, self._swing_contact_body_ids, :]
+        swing_contact_bool = torch.norm(swing_contact_forces, dim=-1) > 1.0
+        foot_z = self._robot.data.body_pos_w[:, self._tibia_robot_body_ids, 2] - terrain_z.unsqueeze(-1)
+        swing_mask = ~swing_contact_bool
+        foot_height_clipped = torch.clamp(foot_z, min=0.0, max=self.cfg.swing_foot_height_target)
+        swing_foot_height = torch.sum(foot_height_clipped * swing_mask.float(), dim=-1)
+
+        # Swing quality bonus — EINMALIGER Bonus beim Aufsetzen (Touchdown), nur wenn die soeben
+        # beendete Schwungphase BEIDE Kriterien erfüllt: Mindesthöhe (Peak während der Phase,
+        # nicht nur der aktuelle Step) UND Mindestdauer (last_air_time). Bewusst binär statt
+        # proportional — kein Anreiz zu endlosem Herumschweben, da nur der Touchdown-Step zählt.
+        # 1. Peak-Höhe der laufenden Schwungphase pro Fuß aktualisieren (raw, ungeclippt, nur
+        #    während swing_mask==True; während Standphase unverändert, wird erst bei Touchdown
+        #    ausgewertet und danach zurückgesetzt).
+        self._swing_peak_height = torch.where(
+            swing_mask,
+            torch.maximum(self._swing_peak_height, foot_z),
+            self._swing_peak_height,
+        )
+        # 2. Touchdown = Übergang von Schwung (voriger Step) zu Kontakt (dieser Step).
+        just_landed = swing_contact_bool & (~self._previous_swing_contact_bool)
+        # 3. Beide Kriterien der SOEBEN beendeten Phase prüfen.
+        height_ok = self._swing_peak_height >= self.cfg.swing_foot_height_target
+        duration_ok = self._contact_sensor.data.last_air_time[:, self._swing_contact_body_ids] \
+            >= self.cfg.swing_foot_duration_target
+        swing_quality_bonus = torch.sum(
+            just_landed.float() * height_ok.float() * duration_ok.float(), dim=-1
+        )
+        # 4. Peak-Höhe für Füße zurücksetzen, die gerade gelandet sind — nächste Schwungphase
+        #    startet bei 0, nicht mit dem Alt-Wert der vorherigen Phase.
+        self._swing_peak_height = torch.where(
+            just_landed, torch.zeros_like(self._swing_peak_height), self._swing_peak_height
+        )
+        self._previous_swing_contact_bool = swing_contact_bool
+
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped  * self.cfg.lin_vel_reward_scale       * self.step_dt,
             "track_ang_vel_z_exp":  yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale       * self.step_dt,
@@ -317,6 +401,8 @@ class PhantomxThesisEnv(DirectRLEnv):
             "foot_contact":         foot_contact_reward    * self.cfg.foot_contact_reward_scale   * self.step_dt,
             "tripod_gait":          tripod_score           * self.cfg.tripod_gait_reward_scale    * self.step_dt,
             "lazy_legs":           -lazy_legs              * self.cfg.lazy_leg_penalty_scale      * self.step_dt,
+            "swing_foot_height":    swing_foot_height       * self.cfg.swing_foot_height_reward_scale * self.step_dt,
+            "swing_quality_bonus":  swing_quality_bonus     * self.cfg.swing_quality_bonus_scale   * self.step_dt,
         }
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -410,6 +496,8 @@ class PhantomxThesisEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._has_stood_up[env_ids] = False
+        self._swing_peak_height[env_ids] = 0.0
+        self._previous_swing_contact_bool[env_ids] = False
 
         # Terrain-Difficulty-Umstufung MUSS vor _apply_velocity_curriculum laufen — sie braucht
         # noch die alten (während der beendeten Episode aktiven) self._commands, die die

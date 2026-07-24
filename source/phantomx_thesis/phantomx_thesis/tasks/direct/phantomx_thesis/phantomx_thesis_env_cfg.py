@@ -105,12 +105,13 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            # War (0.7,1.0)/(0.5,0.8) — kombiniert mit Boden-mu=1.0 (multiply) ergab das
-            # effektiv 0.7-1.0 statisch, deutlich hoeher als reale PLA-Fuesse auf Holzboden
-            # (~0.2-0.45 laut Materialpaarung). Angepasst an die reale Hardware (PLA-3D-Druck
-            # auf Holzboden), um den Reibungs-bedingten Sim-to-Real-Gap zu verkleinern.
-            "static_friction_range": (0.25, 0.45),
-            "dynamic_friction_range": (0.2, 0.35),
+            # War (0.25,0.45)/(0.2,0.35) für PLA-Füße auf Holzboden. Hardware jetzt umgebaut:
+            # Gummistopper auf den Tibia-Spitzen, Untergrund glattes Parkett — griffiger als
+            # blankes PLA auf Holz, aber "glatt" begrenzt den Wert bewusst unter dem alten,
+            # noch früheren Ausgangswert (0.7,1.0)/(0.5,0.8). Kombiniert mit Boden-mu=1.0
+            # (multiply) ergibt das effektiv denselben Bereich wie unten angegeben.
+            "static_friction_range": (0.4, 0.6),
+            "dynamic_friction_range": (0.35, 0.5),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -246,7 +247,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.11    # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
+    target_base_height = 0.12    # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
     movement_speed_x = 0.075     # 7.5 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.075 m/s)
     yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
 
@@ -272,30 +273,30 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # REWARD SCALES - TUNED FOR HEXAPOD LOCOMOTION
     # =====================================================
     #🎯 TRACKING REWARDS (positive)
-    lin_vel_reward_scale = 12.0      #10 hat gut funktioniert
-    yaw_rate_reward_scale = 4.0
+    lin_vel_reward_scale = 12.0      #12 hat gut funktioniert
+    yaw_rate_reward_scale = 5.0
 
     height_reward_scale = 5.0    # mit step_dt in env: 5.0 × 0.02 = 0.1/step max (wie 21.04. Working-Model)
 
     # 🚫 PENALTIES (negative)
-    z_vel_reward_scale = -3.0
+    z_vel_reward_scale = -5.0
     ang_vel_reward_scale = -7.0
-    joint_torque_reward_scale = 0.0#-2e-5
+    joint_torque_reward_scale = 0.0 #-3e-5
     # Gelenkbeschleunigungs-Strafe gegen hektische/ruckartige Bewegung. Startwert -2.5e-7
     # (Original-PPO-Wert, siehe auskommentierter Optuna-Block unten) — jetzt sicher, weil
     # joint_accel_clamp verhindert, dass ein Physik-Instabilitäts-Spike den Batch vergiftet
     # (das war die eigentliche Ursache der früheren Q-Divergenz, nicht der Scale-Wert selbst).
     # Für PPO und SAC bewusst gleich — kein separater SAC-Override mehr, um genau das
     # "stille Überschreiben"-Bugmuster von vorhin nicht zu wiederholen.
-    joint_accel_reward_scale = 0.0   #2.5e-7 hat ok funktioniert
+    joint_accel_reward_scale = 0.0 #-5e-7  #2.5e-7 hat ok funktioniert
     joint_accel_clamp: float = 5.0e7    # Deckel auf sum(joint_acc²) VOR der Skalierung —
                                           # Startwert, via Episode_Reward/dof_acc_l2 beobachten.
                                           # Nach action_scale 0.5→0.75 (1.5x größere mögliche
                                           # Gelenkauslenkung pro Aktion) erneut prüfen, ob dof_acc_l2
                                           # jetzt am Clamp klebt — Beschleunigungs-Obergrenze skaliert
                                           # potenziell mit dem Quadrat der Auslenkung (~2.25x)
-    action_rate_reward_scale = -0.02
-    flat_orientation_reward_scale = -3.0
+    action_rate_reward_scale = -0.05        #default -0.02
+    flat_orientation_reward_scale = -5.0
 
     # movement_penalty_scale deckt jetzt beide Richtungen ab: Unterschreiten (binär, PPO) plus
     # proportionales Überschreiten (siehe _compute_movement_penalty) — bewusst ein gemeinsamer
@@ -309,10 +310,44 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     foot_contact_reward_scale = 1.0
 
     # 🔄 TRIPOD GAIT REWARD — belohnt wechselndes 3-3 Kontaktmuster (alle Beine aktiv)
-    tripod_gait_reward_scale = 2.0
+    tripod_gait_reward_scale = 3.0
 
-    # 😴 LAZY LEG PENALTY — Strafe für Beine die >1s dauerhaft in der Luft hängen
+    # 😴 LAZY LEG PENALTY — Strafe für Beine die >3s dauerhaft in der Luft hängen
     lazy_leg_penalty_scale = 0.5
+
+    # 🦵 SWING FOOT HEIGHT REWARD — Bonus für Fußhöhe über Terrain WÄHREND der Schwungphase
+    # (kein Bonus im Stand). Adressiert das beobachtete "Zuckeln mit minimalen Tibia-Bewegungen"
+    # statt sauberem Anheben/Schwingen — kein bestehender Term (foot_contact/tripod_gait sind
+    # reine Kontakt-Booleans, lazy_legs bestraft nur extrem lange Luftzeit >3s) erfasst bisher
+    # die tatsächliche Fußhöhe während der Schwungphase.
+    swing_foot_height_target: float = 0.03  # m — Ziel-Clearance über Terrain-Referenz. Startwert
+                                              # konservativ: ~1/3 der Femur-Segmentlänge (≈6.6cm),
+                                              # deutlich unter target_base_height=0.11m, aber klar
+                                              # über dem Terrain-Rauschen der leichteren
+                                              # Sub-Terrains (random_rough/gravel_fine: 0.015-0.06m).
+    swing_foot_height_reward_scale: float = 3.0  # AKTIVIERT (erster Testwert, siehe
+                                                  # height_reward_scale=5.0 als Größenvergleich) —
+                                                  # Episode_Reward/swing_foot_height weiter
+                                                  # beobachten, bei Bedarf nachjustieren.
+
+    # 🦵⏱ SWING QUALITY BONUS — zusätzlicher, EINMALIGER Bonus beim Aufsetzen eines Fußes, NUR
+    # wenn die soeben beendete Schwungphase BEIDE Kriterien erfüllt: Mindesthöhe (Peak während
+    # der Phase >= swing_foot_height_target) UND Mindestdauer (last_air_time >=
+    # swing_foot_duration_target). Bewusst binär und nur beim Touchdown ausgezahlt (nicht
+    # kontinuierlich über die Schwungphase wie swing_foot_height oben) — ein proportionaler
+    # "je länger desto besser"-Bonus würde Anreiz zu endlosem Herumschweben schaffen. Adressiert
+    # gezielt schnelle, flache "Zuckel"-Bewegungen: die reichen für swing_foot_height oben u.U.
+    # noch aus, erfüllen aber nicht gleichzeitig Höhe UND Dauer. Eigener Scale (nicht an
+    # swing_foot_height_reward_scale gekoppelt), damit beide Effekte unabhängig kalibrierbar
+    # bleiben.
+    swing_foot_duration_target: float = 0.5   # s — Mindestdauer der Schwungphase. Startwert:
+                                               # plausible Größenordnung für einen vollen
+                                               # Schwungzyklus bei aktuellem velocity_limit=0.8
+                                               # rad/s, aber unverifiziert — per TensorBoard
+                                               # (Episode_Reward/swing_quality_bonus) beobachten.
+    swing_quality_bonus_scale: float = 10.0    # DEAKTIVIERT per Default, gleiches Vorsichtsprinzip
+                                               # wie swing_foot_height_reward_scale — erst Rohwert
+                                               # unter aktuellem Verhalten beobachten.
 
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
@@ -354,8 +389,8 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.11
-    movement_speed_x = 0.075
+    target_base_height = 0.12
+    movement_speed_x = 0.15
     yaw_rotation_speed_x = 0.0
 
     # joint_torque_reward_scale / joint_accel_reward_scale: kein eigener SAC-Override mehr —

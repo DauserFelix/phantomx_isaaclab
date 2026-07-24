@@ -39,6 +39,16 @@ parser.add_argument(
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
 parser.add_argument(
+    "--log_dir",
+    type=str,
+    default=None,
+    help=(
+        "Root directory for this run's logs/checkpoints, overriding the default "
+        "logs/skrl/<agent.experiment.directory> location. The usual {timestamp}_{algorithm}_{framework} "
+        "run subfolder is still created inside it, so runs never collide."
+    ),
+)
+parser.add_argument(
     "--resume_step",
     type=int,
     default=None,
@@ -237,7 +247,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg["seed"]
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "skrl", agent_cfg["agent"]["experiment"]["directory"])
+    if args_cli.log_dir is not None:
+        log_root_path = args_cli.log_dir
+    else:
+        log_root_path = os.path.join("logs", "skrl", agent_cfg["agent"]["experiment"]["directory"])
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
