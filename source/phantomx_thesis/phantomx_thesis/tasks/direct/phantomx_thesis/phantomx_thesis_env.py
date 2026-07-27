@@ -79,20 +79,37 @@ class PhantomxThesisEnv(DirectRLEnv):
             "tibia_rf", "tibia_rm", "tibia_rr"
         ], preserve_order=True)
 
-        # State for the swing_quality_bonus reward (coupled height+duration criterion): tracks
-        # the PEAK raw foot height reached so far during the currently ongoing swing phase per
-        # foot, and the previous step's contact status (to detect the exact touchdown step).
-        # Reset per-env in _reset_idx(), analogous to self._actions/_previous_actions.
-        self._swing_peak_height = torch.zeros(self.num_envs, 6, device=self.device)
-        self._previous_swing_contact_bool = torch.zeros(
-            self.num_envs, 6, dtype=torch.bool, device=self.device
-        )
-
         # Tripod gait indices into the 6-element foot array (order: lf=0, lm=1, lr=2, rf=3, rm=4, rr=5)
         self._TRIPOD_A = [0, 4, 2]  # lf, rm, lr
         self._TRIPOD_B = [3, 1, 5]  # rf, lm, rr
 
         self._has_stood_up = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # Action-latency ring buffer (see cfg.enable_action_latency): holds the last
+        # (max_latency+1) processed PD targets per env, so _apply_action() can apply an
+        # env-specific delayed target instead of the just-computed one. Sized once for the max
+        # possible delay in the configured range — per-env delay itself is drawn in _reset_idx().
+        # No-op-shaped even when disabled (buffer still allocated, just never advanced/read) to
+        # avoid a second code path; the actual behavior gate is _apply_action()'s cfg check.
+        self._action_latency_max_steps = max(self.cfg.action_latency_steps_range)
+        self._action_latency_buffer = torch.zeros(
+            self._action_latency_max_steps + 1, self.num_envs, self._robot.num_joints,
+            device=self.device,
+        )
+        self._action_latency_buffer_idx = 0
+        self._action_latency_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+
+        # State for the "imu_integration" lin_vel_b estimation mode (see cfg.lin_vel_estimation_mode):
+        # a leaky integrator of noisy, biased acceleration, mirroring the real hardware pipeline
+        # (phantomx_policy_real_data_interface.py), which has no odometry sensor. _lin_vel_imu_bias
+        # is a slow random walk (unlike _lin_vel_imu_estimate, it is NEVER reset by contact/attitude
+        # info — it purely accumulates), _lin_vel_imu_estimate is the leaky-integrated velocity
+        # actually fed into the observation in "imu_integration" mode.
+        self._lin_vel_imu_estimate = torch.zeros(self.num_envs, 3, device=self.device)
+        self._lin_vel_imu_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self._previous_root_lin_vel_b = torch.zeros(self.num_envs, 3, device=self.device)
 
         # Accumulator for the true (non-reward) average forward walking speed per episode —
         # separate from _episode_sums, since it's a raw m/s measurement, not a reward term, and
@@ -123,7 +140,6 @@ class PhantomxThesisEnv(DirectRLEnv):
                 "tripod_gait",
                 "lazy_legs",
                 "swing_foot_height",
-                "swing_quality_bonus",
             ]
         }
 
@@ -205,13 +221,71 @@ class PhantomxThesisEnv(DirectRLEnv):
             )
         self._processed_actions = processed_actions
 
+        # Action-latency ring buffer (cfg.enable_action_latency): always maintained (cheap write),
+        # so toggling the flag doesn't require re-seeding a freshly-allocated buffer with stale
+        # zeros. Write the just-computed target at the current write head; _apply_action() below
+        # reads back per-env with its own delay offset.
+        self._action_latency_buffer[self._action_latency_buffer_idx] = self._processed_actions
+
     def _apply_action(self):
-        self._robot.set_joint_position_target(self._processed_actions)
+        if self.cfg.enable_action_latency:
+            # Per-env delayed read: env i gets the target written _action_latency_steps[i] writes
+            # ago. Buffer has max_steps+1 slots so every configured delay (including the max) has
+            # a valid, already-written slot to read from — this only holds as long as
+            # action_latency_steps_range's upper bound matches _action_latency_max_steps (set once
+            # from the same range at env construction), so the buffer is never read before it was
+            # first written for that offset.
+            read_idx = (
+                self._action_latency_buffer_idx - self._action_latency_steps
+            ) % (self._action_latency_max_steps + 1)
+            env_idx = torch.arange(self.num_envs, device=self.device)
+            target = self._action_latency_buffer[read_idx, env_idx]
+        else:
+            target = self._processed_actions
+        self._robot.set_joint_position_target(target)
+        self._action_latency_buffer_idx = (
+            self._action_latency_buffer_idx + 1
+        ) % (self._action_latency_max_steps + 1)
+
+    def _compute_lin_vel_observation(self) -> torch.Tensor:
+        """root_lin_vel_b observation, in one of two modes (cfg.lin_vel_estimation_mode).
+
+        "ground_truth" (default, unchanged prior behavior): the simulator's exact body-frame
+        linear velocity plus small IID Gaussian sensor noise — matches what the Gazebo deployment
+        gets from a real odometry plugin, but NOT what the real-hardware deployment can obtain
+        (no odometry sensor on the physical robot).
+
+        "imu_integration": mirrors phantomx_policy_real_data_interface.py's actual estimation
+        path — lin_vel_b is never read directly, only reconstructed by leaky-integrating a noisy,
+        BIASED acceleration signal. The bias is a slow random walk (accumulates without bound,
+        unlike the noise term, which averages out) — this is the qualitatively different failure
+        mode a simple IID-noise-on-ground-truth model cannot represent, since real accelerometer
+        bias drifts over the course of an episode rather than resetting every step.
+        """
+        root_lin_vel_b = self._robot.data.root_lin_vel_b
+        if self.cfg.lin_vel_estimation_mode == "ground_truth":
+            return root_lin_vel_b + torch.randn_like(root_lin_vel_b) * 0.01
+
+        # "imu_integration": approximate the body-frame acceleration a real IMU would have
+        # measured this step via finite difference of the (otherwise inaccessible in this
+        # simplified model) ground-truth velocity — a real accelerometer measures acceleration
+        # directly, but this finite-difference stands in for it without adding a full rigid-body
+        # force model. self._previous_root_lin_vel_b is updated at the end of this branch.
+        accel = (root_lin_vel_b - self._previous_root_lin_vel_b) / self.step_dt
+        self._previous_root_lin_vel_b = root_lin_vel_b.clone()
+
+        self._lin_vel_imu_bias += torch.randn_like(self._lin_vel_imu_bias) * self.cfg.lin_vel_imu_bias_std
+        noisy_accel = accel + self._lin_vel_imu_bias + torch.randn_like(accel) * self.cfg.lin_vel_imu_noise_std
+
+        self._lin_vel_imu_estimate = (
+            self.cfg.lin_vel_imu_leak * self._lin_vel_imu_estimate + noisy_accel * self.step_dt
+        )
+        return self._lin_vel_imu_estimate
 
     # --------------------- OBSERVATIONS ---------------------
     def _get_observations(self) -> dict:
         # Sensor-Messungen mit Rauschen (Sim-to-Real: modelliert Encoder/IMU-Noise)
-        lin_vel  = self._robot.data.root_lin_vel_b  + torch.randn_like(self._robot.data.root_lin_vel_b)  * 0.01
+        lin_vel = self._compute_lin_vel_observation()
         ang_vel  = self._robot.data.root_ang_vel_b  + torch.randn_like(self._robot.data.root_ang_vel_b)  * 0.01
         gravity  = self._robot.data.projected_gravity_b + torch.randn_like(self._robot.data.projected_gravity_b) * 0.01
         jpos_rel = (self._robot.data.joint_pos - self._robot.data.default_joint_pos) + torch.randn(self.num_envs, self._robot.num_joints, device=self.device) * 0.01
@@ -358,34 +432,6 @@ class PhantomxThesisEnv(DirectRLEnv):
         foot_height_clipped = torch.clamp(foot_z, min=0.0, max=self.cfg.swing_foot_height_target)
         swing_foot_height = torch.sum(foot_height_clipped * swing_mask.float(), dim=-1)
 
-        # Swing quality bonus — EINMALIGER Bonus beim Aufsetzen (Touchdown), nur wenn die soeben
-        # beendete Schwungphase BEIDE Kriterien erfüllt: Mindesthöhe (Peak während der Phase,
-        # nicht nur der aktuelle Step) UND Mindestdauer (last_air_time). Bewusst binär statt
-        # proportional — kein Anreiz zu endlosem Herumschweben, da nur der Touchdown-Step zählt.
-        # 1. Peak-Höhe der laufenden Schwungphase pro Fuß aktualisieren (raw, ungeclippt, nur
-        #    während swing_mask==True; während Standphase unverändert, wird erst bei Touchdown
-        #    ausgewertet und danach zurückgesetzt).
-        self._swing_peak_height = torch.where(
-            swing_mask,
-            torch.maximum(self._swing_peak_height, foot_z),
-            self._swing_peak_height,
-        )
-        # 2. Touchdown = Übergang von Schwung (voriger Step) zu Kontakt (dieser Step).
-        just_landed = swing_contact_bool & (~self._previous_swing_contact_bool)
-        # 3. Beide Kriterien der SOEBEN beendeten Phase prüfen.
-        height_ok = self._swing_peak_height >= self.cfg.swing_foot_height_target
-        duration_ok = self._contact_sensor.data.last_air_time[:, self._swing_contact_body_ids] \
-            >= self.cfg.swing_foot_duration_target
-        swing_quality_bonus = torch.sum(
-            just_landed.float() * height_ok.float() * duration_ok.float(), dim=-1
-        )
-        # 4. Peak-Höhe für Füße zurücksetzen, die gerade gelandet sind — nächste Schwungphase
-        #    startet bei 0, nicht mit dem Alt-Wert der vorherigen Phase.
-        self._swing_peak_height = torch.where(
-            just_landed, torch.zeros_like(self._swing_peak_height), self._swing_peak_height
-        )
-        self._previous_swing_contact_bool = swing_contact_bool
-
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped  * self.cfg.lin_vel_reward_scale       * self.step_dt,
             "track_ang_vel_z_exp":  yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale       * self.step_dt,
@@ -402,7 +448,6 @@ class PhantomxThesisEnv(DirectRLEnv):
             "tripod_gait":          tripod_score           * self.cfg.tripod_gait_reward_scale    * self.step_dt,
             "lazy_legs":           -lazy_legs              * self.cfg.lazy_leg_penalty_scale      * self.step_dt,
             "swing_foot_height":    swing_foot_height       * self.cfg.swing_foot_height_reward_scale * self.step_dt,
-            "swing_quality_bonus":  swing_quality_bonus     * self.cfg.swing_quality_bonus_scale   * self.step_dt,
         }
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -496,8 +541,24 @@ class PhantomxThesisEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
         self._has_stood_up[env_ids] = False
-        self._swing_peak_height[env_ids] = 0.0
-        self._previous_swing_contact_bool[env_ids] = False
+
+        # Re-draw the per-env action-delay for the upcoming episode (cfg.enable_action_latency).
+        # Drawn even when disabled — cheap, and keeps _apply_action()'s indexing logic branch-free
+        # regardless of when the flag is toggled mid-experimentation.
+        low, high = self.cfg.action_latency_steps_range
+        self._action_latency_steps[env_ids] = torch.randint(
+            low, high + 1, (len(env_ids),), device=self.device
+        )
+        # Seed the buffer's reset slots with the post-reset default pose target, not stale zeros —
+        # otherwise a freshly reset env would apply a bogus all-zero PD target for up to
+        # action_latency_max_steps until the buffer "catches up" with real actions.
+        self._action_latency_buffer[:, env_ids] = self._robot.data.default_joint_pos[env_ids]
+
+        # Reset the IMU-integration lin_vel_b estimator state (cfg.lin_vel_estimation_mode) —
+        # a fresh episode must not carry over accumulated bias/velocity from a previous rollout.
+        self._lin_vel_imu_estimate[env_ids] = 0.0
+        self._lin_vel_imu_bias[env_ids] = 0.0
+        self._previous_root_lin_vel_b[env_ids] = 0.0
 
         # Terrain-Difficulty-Umstufung MUSS vor _apply_velocity_curriculum laufen — sie braucht
         # noch die alten (während der beendeten Episode aktiven) self._commands, die die

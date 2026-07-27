@@ -135,7 +135,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     episode_length_s = 40.0
     decimation = 4
-    action_scale = 0.75       # Policy gibt direkte ±0.75 rad Abweichung von Default-Pose
+    action_scale = 0.5       # Policy gibt direkte ±0.75 rad Abweichung von Default-Pose
     joint_pos_limit: float = 1.0  # ≈57.3° um Default-Stellung — proportional mit action_scale mitgezogen
                                    # (0.75/1.0, dieselbe relative Marge wie vorher 0.5/0.7854), damit das
                                    # Clamp in _pre_physics_step weiterhin nur als Sicherheitsnetz wirkt und
@@ -269,6 +269,50 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
                                            # Replay-Buffer-Samples dominieren — siehe Q1(min)-Divergenz-Diagnose)
     reward_clamp_value: float = 20.0      # nur wirksam wenn clamp_reward=True
 
+    # =====================================================
+    # SIM-TO-REAL GAP MODELING — beide additiv, Default=deaktiviert (reproduziert exaktes
+    # heutiges Verhalten). Adressieren zwei der in der Sim-to-Real-Gap-Analyse identifizierten
+    # Lücken: (1) fehlende Latenz zwischen Policy-Aktion und tatsächlicher Anwendung
+    # (Servobus-/Inferenzlatenz existierte bisher gar nicht in der Simulation), (2) lin_vel_b
+    # als Ground-Truth-nahes Signal, obwohl die reale Hardware (kein Odometrie-Sensor) es nur
+    # über IMU-Doppelintegration mit akkumulierendem Bias schätzen kann.
+    # =====================================================
+    enable_action_latency: bool = False   # True: verzögert die tatsächlich angewendete PD-Ziel-
+                                           # position um action_latency_steps_range Steps (siehe
+                                           # _apply_action() in env.py) — bildet Servobus-/ROS2-
+                                           # Messaging-/Inferenzlatenz nach, die im Training bisher
+                                           # nicht existierte (Policy-Aktion wirkte bisher instantan
+                                           # im selben Schritt).
+    action_latency_steps_range: tuple[int, int] = (0, 2)  # pro Env bei jedem Reset gleichverteilt
+                                                            # gezogene Verzögerung in Policy-Steps
+                                                            # (nicht Physik-Substeps) — 0 bewusst im
+                                                            # Bereich enthalten, damit ein Teil der
+                                                            # Envs weiterhin die unverzögerte
+                                                            # Dynamik sieht (kein Alles-oder-Nichts).
+
+    lin_vel_estimation_mode: str = "ground_truth"  # "ground_truth": bisheriges Verhalten
+                                                    # (root_lin_vel_b + kleines Gaussian-Rauschen).
+                                                    # "imu_integration": simuliert die reale
+                                                    # Real-Data-Deployment-Pipeline (keine
+                                                    # Odometrie vorhanden) — lin_vel_b wird NICHT
+                                                    # direkt aus der Simulation gelesen, sondern
+                                                    # aus einer rauschbehafteten, driftenden
+                                                    # Beschleunigungs-Integration rekonstruiert
+                                                    # (siehe _get_observations() in env.py).
+    lin_vel_imu_bias_std: float = 0.02     # m/s² Standardabweichung des Random-Walk-Bias auf die
+                                            # integrierte Beschleunigung — Kernunterschied zu
+                                            # simplem Rauschen: akkumuliert unbegrenzt über die Zeit
+                                            # statt sich über viele Steps wegzumitteln.
+    lin_vel_imu_noise_std: float = 0.05    # m/s² Standardabweichung des hochfrequenten
+                                            # (nicht-akkumulierenden) Beschleunigungsmess-Rauschens,
+                                            # zusätzlich zum Bias oben.
+    lin_vel_imu_leak: float = 0.99         # Leaky-Integrator-Faktor (siehe reale ROS2-Pipeline,
+                                            # phantomx_policy_real_data_interface.py:
+                                            # "self.lin_vel_b = 0.99 * self.lin_vel_b + a_body*dt")
+                                            # — verhindert unbegrenzten Drift, führt aber selbst zu
+                                            # einem systematischen Abklingen der geschätzten
+                                            # Geschwindigkeit ohne neue Beschleunigung.
+
     # =======================================   ==============
     # REWARD SCALES - TUNED FOR HEXAPOD LOCOMOTION
     # =====================================================
@@ -329,25 +373,6 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
                                                   # height_reward_scale=5.0 als Größenvergleich) —
                                                   # Episode_Reward/swing_foot_height weiter
                                                   # beobachten, bei Bedarf nachjustieren.
-
-    # 🦵⏱ SWING QUALITY BONUS — zusätzlicher, EINMALIGER Bonus beim Aufsetzen eines Fußes, NUR
-    # wenn die soeben beendete Schwungphase BEIDE Kriterien erfüllt: Mindesthöhe (Peak während
-    # der Phase >= swing_foot_height_target) UND Mindestdauer (last_air_time >=
-    # swing_foot_duration_target). Bewusst binär und nur beim Touchdown ausgezahlt (nicht
-    # kontinuierlich über die Schwungphase wie swing_foot_height oben) — ein proportionaler
-    # "je länger desto besser"-Bonus würde Anreiz zu endlosem Herumschweben schaffen. Adressiert
-    # gezielt schnelle, flache "Zuckel"-Bewegungen: die reichen für swing_foot_height oben u.U.
-    # noch aus, erfüllen aber nicht gleichzeitig Höhe UND Dauer. Eigener Scale (nicht an
-    # swing_foot_height_reward_scale gekoppelt), damit beide Effekte unabhängig kalibrierbar
-    # bleiben.
-    swing_foot_duration_target: float = 0.5   # s — Mindestdauer der Schwungphase. Startwert:
-                                               # plausible Größenordnung für einen vollen
-                                               # Schwungzyklus bei aktuellem velocity_limit=0.8
-                                               # rad/s, aber unverifiziert — per TensorBoard
-                                               # (Episode_Reward/swing_quality_bonus) beobachten.
-    swing_quality_bonus_scale: float = 10.0    # DEAKTIVIERT per Default, gleiches Vorsichtsprinzip
-                                               # wie swing_foot_height_reward_scale — erst Rohwert
-                                               # unter aktuellem Verhalten beobachten.
 
     # =====================================================
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING

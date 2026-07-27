@@ -265,55 +265,313 @@ Reward-Komponenten sichtbar zu wirken.
 EMPFEHLUNG (Analyse, keine Umsetzung): 10.0-15.0 als ersten Testwert statt 3.0, um in der
 Größenordnung von movement_penalty_scale/tripod_gait_reward_scale zu liegen. Wie bei
 swing_foot_height: am Rohwert (Episode_Reward/swing_quality_bonus) kalibrieren, nicht raten.
-Konkrete Umsetzung (Werteänderung) vom User noch nicht in Auftrag gegeben — Empfehlung bislang
-rein beratend, Cfg-Wert bleibt bei den vom User selbst gesetzten 3.0.
+User setzte den Wert daraufhin selbst auf 10.0 — kurz darauf aber vollständiger Rollback
+angefordert (siehe 8.3), Empfehlung damit hinfällig.
 
 
 --------------------------------------------------------------------------------
-9. GEÄNDERTE DATEIEN DIESER SESSION
+9. BESTANDSBUG-VERDACHT self._die_body_ids — ERNEUT ANALYSIERT (Nachfrage), KEINE CODE-ÄNDERUNG
+--------------------------------------------------------------------------------
+
+User bat um erneute, ausführliche Analyse (nur Analyse, explizit keine Code-Änderung) des in
+Log 07-23 aufgeworfenen Verdachts: self._die_body_ids (env.py, ContactSensor-Query ohne
+preserve_order=True) könnte in falscher Reihenfolge vorliegen, wodurch _TRIPOD_A=[0,4,2]/
+_TRIPOD_B=[3,1,5] (Kommentar: "order: lf=0,lm=1,lr=2,rf=3,rm=4,rr=5") die Beine tatsächlich
+falsch links/rechts zuordnen könnten, falls der interne ContactSensor-Namespace der
+URDF-Deklarationsreihenfolge (rf,rm,rr,lf,lm,lr statt lf-zuerst) folgt.
+
+Vollständig rekonstruiert und präzisiert: betroffene Nutzungsstellen sind foot_forces (Zeile
+331), tripod_a/tripod_b via _TRIPOD_A/_TRIPOD_B (Zeilen 337-338), current_air_times für
+lazy_legs (Zeile 342). Kern des Verdachts weiterhin unverifiziert (Sandbox ohne CUDA/PhysX/pxr).
+Neu eingeordnet: selbst falls der Verdacht zutrifft, wäre der numerische Trainingseffekt auf
+tripod_gait vermutlich gering, da die 3-3-Gruppierung symmetrisch ist (kein Bezug auf "welche
+Seite") — die Policy könnte trotzdem ein funktionierendes Gangmuster lernen, nur mit einer
+anderen tatsächlichen Bein-Gruppierung als im Code kommentiert. Der swing_foot_height-Term ist
+von diesem Verdacht nicht betroffen (nutzt bewusst den separaten, order-sicheren
+self._swing_contact_body_ids-Tensor). Status unverändert: self._die_body_ids bleibt
+unangetastet (Bestandscode, User-Entscheidung aus Log 07-23).
+
+USER-NACHFRAGE: was im Container einzugeben ist, um den Verdacht zu verifizieren/falsifizieren.
+Antwort: find_bodies() zweimal aufrufen (ohne und mit preserve_order=True) und die
+zurückgegebenen NAMEN vergleichen — beantwortet die Frage direkt über die Laufzeit-API, ohne
+USD/PhysX-Interna verstehen zu müssen. Konkretes Diagnose-Snippet bereitgestellt (Env aus
+PhantomxThesisFlatEnvCfg mit num_envs=1 instanziieren, dann
+env._contact_sensor.find_bodies(names) vs. find_bodies(names, preserve_order=True) sowie
+env._robot.find_bodies(names, preserve_order=True) vergleichen). Interpretation erklärt: gleiche
+Reihenfolge in beiden Aufrufen → Verdacht falsifiziert; abweichende Reihenfolge (z.B.
+rf,rm,rr,lf,lm,lr statt Query-Reihenfolge) → Verdacht bestätigt. Datei wurde nicht angelegt (nur
+als Snippet in der Antwort geliefert), da vom User nicht explizit angefordert.
+
+
+--------------------------------------------------------------------------------
+10. UNTERGRUND-FRAGE: MACHT MINIMALER GRAVEL SINN? (Sim-to-Real-Gap, nur Analyse)
+--------------------------------------------------------------------------------
+
+User fragte im Rahmen der Sim-to-Real-Gap-Diskussion (Fortsetzung der Reibungsanpassung aus
+Punkt 4), ob ein minimaler Gravel-Anteil auf der aktuell für Training genutzten Terrain-Variante
+sinnvoll wäre. Ausdrücklich als "nur Analyse, keine Codeänderung" markiert.
+
+BEFUND (Code-Recherche in phantomx_thesis_env_cfg.py): Gravel (gravel_fine/gravel_coarse, je
+20% Anteil) existiert bereits in ROUGH_TERRAINS_CFG — aber nur PhantomxThesisEnvCfg (Rough-
+Basisklasse) nutzt diesen Terrain-Generator. Die aktuell für den laufenden Trainingslauf
+verwendete Klasse (PhantomxThesisFlatEnvCfg, erkennbar am geöffneten Checkpoint-Pfad
+phantomx_ppo/2026-07-24_05-19-37_ppo_torch) läuft auf terrain_type="plane" — komplett eben,
+kein Höhenrauschen.
+
+ANALYSE-ERGEBNIS: Ja, aus mehreren Gründen sinnvoll — (1) reale Böden sind nie perfekt eben,
+Terrain-Rauschen ist die konsequente Fortsetzung des bereits etablierten Domain-Randomization-
+Prinzips (Reibung, Masse); (2) der Kommentar bei random_rough ("simuliert Gras/Kies/unebenen
+Boden") zeigt, dass die Absicht schon vorhanden war, nur nie auf die Flat-Trainingsvariante
+angewendet wurde; (3) gravel_fine/gravel_coarse sind bereits auf ~60% ihrer ursprünglichen Werte
+entschärft und mit Sicherheitsabstand zu termination_height=0.10 kalibriert — Vorarbeit ist
+also schon vorhanden.
+EMPFEHLUNG: eher ein kleiner random_rough-artiger Rauschanteil (z.B. noise_range 1-2cm) statt
+der bereits vorhandenen, gröberen Gravel-Presets — UND explizit ERST NACHDEM der aktuelle
+swing_foot_height-Tuning-Zyklus auf Flat abgeschlossen ist, um Kalibrierungs-Interferenz zu
+vermeiden (Terrain-Referenz env_origins[:,2] ist nur der globale, nicht lokale Bodenwert — bei
+Rauschen entstünde zusätzliches Signal-Rauschen genau im Term, der gerade beobachtet wird).
+Keine Umsetzung — reine Analyse wie angefordert.
+
+
+--------------------------------------------------------------------------------
+11. swing_quality_bonus — VOLLSTÄNDIG ZURÜCKGEBAUT (User-Auftrag: "Mach das alles rückgängig!")
+--------------------------------------------------------------------------------
+
+Auf Nachfrage präzisiert (AskUserQuestion): "alles rückgängig" bezog sich auf das KOMPLETTE
+Feature, nicht nur den Scale-Wert (Alternative "nur Scale auf 0.0" wurde explizit angeboten und
+nicht gewählt). Grund/Kontext dieser Kehrtwende nicht vom User genannt — vermutlich schlicht
+Rückzug auf den zuletzt als stabil bekannten swing_foot_height-Stand, ohne den zusätzlichen,
+noch unverifizierten swing_quality_bonus-Term.
+
+VOLLSTÄNDIG ENTFERNT (beide Dateien wieder exakt auf den Stand vor Abschnitt 8 dieses Logs):
+  phantomx_thesis_env_cfg.py:
+    -> swing_foot_duration_target und swing_quality_bonus_scale (samt Kommentarblock) entfernt.
+    -> swing_foot_height_target/swing_foot_height_reward_scale bleiben unverändert bestehen
+       (Scale weiterhin 3.0, wie vom User selbst zuvor aktiviert — NICHT Teil des Rollbacks).
+  phantomx_thesis_env.py:
+    -> __init__: self._swing_peak_height / self._previous_swing_contact_bool entfernt.
+    -> _episode_sums-Dict: Key "swing_quality_bonus" entfernt ("swing_foot_height" bleibt).
+    -> _reset_idx(): die beiden zugehörigen Reset-Zeilen entfernt.
+    -> _get_rewards(): der komplette just_landed/height_ok/duration_ok/swing_quality_bonus-Block
+       entfernt, Dict-Eintrag "swing_quality_bonus" entfernt. swing_foot_height-Formel selbst
+       (swing_contact_forces/swing_contact_bool/foot_z/swing_mask/foot_height_clipped) NICHT
+       angetastet — sie wird von self._swing_contact_body_ids/self._tibia_robot_body_ids weiter
+       genutzt, die bereits Teil der ursprünglichen swing_foot_height-Implementierung waren.
+
+VERIFIKATION: grep über beide Dateien auf alle mit dem Feature verbundenen Bezeichner
+(swing_peak_height, previous_swing_contact_bool, swing_quality_bonus, swing_foot_duration_target,
+just_landed, height_ok, duration_ok) — keine Treffer mehr. py_compile auf beide Dateien:
+fehlerfrei. Diff-Kontrolle bestätigt: verbleibender swing_foot_height-Block ist Zeile für Zeile
+identisch zum Stand vor der swing_quality_bonus-Einführung.
+
+
+--------------------------------------------------------------------------------
+11.1 UNABHÄNGIGE NACHVERIFIKATION DES ROLLBACKS (User: "überprüfe das nochmal")
+--------------------------------------------------------------------------------
+
+User bat um erneute, unabhängige Prüfung des Rollbacks aus Abschnitt 11. Wichtiger Fund dabei:
+das Projektverzeichnis ist entgegen bisheriger Annahme in dieser Sitzung DOCH ein initialisiertes
+Git-Repo (Branch ppo_sac_config_merge, trackt origin) — bisher wurde in den Logs mangels
+Kenntnis darüber immer nur grep/py_compile zur Verifikation genutzt. Ab jetzt zusätzlich verfügbar
+und für diese Prüfung genutzt: `git diff`/`git status` als präziseres, vollständiges
+Vergleichswerkzeug gegenüber dem letzten Commit.
+
+git diff --stat bestätigte für beide betroffenen Dateien AUSSCHLIESSLICH Löschungen gegenüber dem
+letzten Commit (41 bzw. 19 gelöschte Zeilen, keine Hinzufügungen) — der letzte Commit im Repo
+enthielt also bereits den vollen swing_quality_bonus-Stand (vermutlich vom User zwischenzeitlich
+committet), der Rollback dieser Session entfernt ihn lokal wieder.
+
+Vollständiger git diff für beide Dateien geprüft: enthält exakt und ausschließlich die 4 in
+Abschnitt 11 dokumentierten Blöcke (State im __init__, _episode_sums-Key, Formel+Dict-Eintrag in
+_get_rewards(), Reset-Zeilen in _reset_idx() — env.py; kompletter Cfg-Block — env_cfg.py). Keine
+sonstigen, ungewollten Änderungen im Diff enthalten. swing_foot_height_target/
+swing_foot_height_reward_scale=3.0 im Cfg-Diff korrekt unverändert (kein Löschungs-/
+Änderungs-Eintrag für diese beiden Zeilen).
+
+git status --short zeigte als einzige uncommittete Änderungen: diese beiden Quelldateien, diesen
+Log, sowie zwei .pyc-Cache-Dateien (Nebenprodukt des py_compile-Laufs, ohne Relevanz für einen
+echten Trainingslauf, der die .py-Quellen neu kompiliert) — keine unerwarteten/versehentlichen
+Änderungen an anderen Dateien.
+
+py_compile erneut ausgeführt: weiterhin fehlerfrei.
+
+FAZIT: Rollback ist git-diff-bestätigt vollständig und sauber, keine Nacharbeit nötig.
+
+
+--------------------------------------------------------------------------------
+11.2 SIM-TO-SIM/SIM-TO-REAL-GAP-ANALYSE (Workflow) + last_actions-BUGFIX-PROMPT + UMSETZUNG
+     LATENZ-MODELLIERUNG UND lin_vel_b-REALISMUS
+--------------------------------------------------------------------------------
+
+User bat um Vergleich von play.py/Env-Code gegen die ROS2-Deployment-Interfaces
+(phantomx_policy_simulation_interface.py für Gazebo, phantomx_policy_real_data_interface.py für
+echte Hardware — letztere existiert NUR als Chat-eingefügter Inhalt, nicht als Datei im
+Workspace) zur Frage, warum sich die PPO-Bewegung in Gazebo/real anders zeigt als in Isaac Lab.
+
+Gefundene Diskrepanzen (Analyse, damals keine Umsetzung):
+  1. EMA-Glättung der Aktionen im Deployment (ema_alpha=0.20) — existiert im Training nicht.
+  2. Rate-Limiting auf dem Ziel-Gelenkwinkel als Näherung für PD-Reglerverhalten (statt echter
+     velocity_limit-Dynamik).
+  3. last_actions-Rückführung nutzt die EMA-GEGLÄTTETE statt die rohe geclippte Aktion — echter
+     Bug (Policy sieht einen Feedback-Wert, den sie im Training nie gesehen hat, Fehler
+     akkumuliert über die Zeit).
+  4. Real-Data-Variante: lin_vel_b via IMU-Doppelintegration (kein Odometrie-Sensor auf echter
+     Hardware) statt Ground-Truth wie in Gazebo/Training.
+
+Anschließend umfassende Workflow-Analyse (5 parallele Agenten: Aktuator-Dynamik, Sensor/Latenz,
+Kontakt/Terrain/Reibung, Deployment-Pipeline-Treue, fehlende Domain-Randomization) + Synthese zu
+einem priorisierten Sim-to-Real-Gap-Bericht. Top-Gaps identifiziert: fehlende Push-Perturbationen,
+keine Latenzmodellierung (Action-/Observation-Delay), lin_vel_b als Ground-Truth-nahes Signal ohne
+reales Sensormodell, last_actions-Bug, PD-Gains/Effort-Limits als Fixwerte statt randomisiert.
+
+BUGFIX-PROMPT: da die betroffenen ROS2-Dateien im Workspace veraltet sind (die hier vorliegende
+phantomx_policy_simulation_interface.py hat gar keine EMA/Rate-Limiting-Logik, der Bug existiert
+dort nicht — der User arbeitet an anderer Stelle mit dem aktuellen Stand), wurde EIN eigenständiger
+Prompt für einen SEPARATEN Claude-Code-Chat im echten ROS2-Workspace geschrieben (nicht hier
+umgesetzt): last_actions soll auf die rohe, geclippte statt die EMA-geglättete Aktion gesetzt
+werden, EMA-Glättung/Rate-Limiting selbst UNVERÄNDERT lassen. Datei:
+/tmp/claude-0/.../scratchpad/prompt_fix_last_actions_bug.md (Scratchpad, nicht Teil des Projekts).
+
+USER-FRAGE: können bestehende trainierte Agents mit dem last_actions-Bugfix verwendet werden?
+Antwort: ja, uneingeschränkt — der Fix betrifft nur das Deployment-Skript, nicht die
+Policy-Gewichte; jeder existierende Checkpoint profitiert potenziell davon, kein Neu-Training
+nötig.
+
+UMSETZUNG (dieser Workspace, phantomx_thesis_env.py/env_cfg.py): auf User-Wunsch Punkt 2 (Latenz)
+UND Punkt 3 (lin_vel_b-Realismus) UMGESETZT, nachdem geklärt wurde, dass beide unabhängig genug
+sind (verschiedene Codestellen, kein gemeinsamer State) — beide additiv mit eigenem Cfg-Flag,
+Default=deaktiviert (identisch zum bisherigen Verhalten), analog zum swing_foot_height-Muster.
+
+  Neuer Cfg-Block "SIM-TO-REAL GAP MODELING" (phantomx_thesis_env_cfg.py, PhantomxThesisEnvCfg):
+    enable_action_latency: bool = False
+    action_latency_steps_range: tuple[int,int] = (0, 2)   # pro Env bei Reset gleichverteilt gezogen
+    lin_vel_estimation_mode: str = "ground_truth"          # oder "imu_integration"
+    lin_vel_imu_bias_std: float = 0.02      # m/s², Random-Walk-Bias-Zuwachs pro Step
+    lin_vel_imu_noise_std: float = 0.05     # m/s², hochfrequentes Messrauschen
+    lin_vel_imu_leak: float = 0.99          # Leaky-Integrator-Faktor (identisch zur realen
+                                             # ROS2-Pipeline "self.lin_vel_b = 0.99*lin_vel_b+a*dt")
+
+  phantomx_thesis_env.py __init__: neuer State
+    _action_latency_max_steps/_action_latency_buffer (Ringpuffer, Größe max_steps+1 pro Env/Joint)/
+    _action_latency_buffer_idx (globaler Schreibkopf)/_action_latency_steps (pro-Env-Delay)
+    _lin_vel_imu_estimate/_lin_vel_imu_bias/_previous_root_lin_vel_b
+
+  _pre_physics_step(): schreibt _processed_actions zusätzlich in den Ringpuffer (immer, auch bei
+    deaktiviertem Flag — billig, vermeidet zweiten Codepfad).
+
+  _apply_action(): bei enable_action_latency=True liest pro Env einen um _action_latency_steps[i]
+    Steps verzögerten Ringpuffer-Eintrag (Modulo-Indizierung auf Buffergröße max_steps+1) statt des
+    aktuellen Werts; bei False (Default) exakt der alte Pfad (target=_processed_actions).
+
+  _reset_idx(): zieht pro Env neu action_latency_steps ~ Uniform(low,high) aus
+    action_latency_steps_range, befüllt die Ringpuffer-Reset-Slots mit der Default-Pose (verhindert
+    All-Null-PD-Ziel direkt nach Reset, bis der Puffer sich neu füllt); setzt
+    _lin_vel_imu_estimate/_lin_vel_imu_bias/_previous_root_lin_vel_b auf 0 (kein State-Leck
+    zwischen Episoden).
+
+  Neue Methode _compute_lin_vel_observation(): bei "ground_truth" (Default) exakt der alte Pfad
+    (root_lin_vel_b + randn*0.01). Bei "imu_integration": Beschleunigung per Finite-Differenz aus
+    root_lin_vel_b approximiert (Stand-in für einen direkten Beschleunigungssensor), Bias-Random-Walk
+    akkumuliert unbegrenzt (nicht wie Rauschen sich wegmittelnd), Leaky-Integrator wie in der realen
+    Pipeline. Aufgerufen aus _get_observations() statt der bisherigen Inline-Formel für lin_vel.
+
+VERIFIKATION: py_compile beide Dateien fehlerfrei. Isolierte Arithmetik-Verifikation (reines
+Python, kein torch in dieser Sandbox verfügbar):
+  - Ringpuffer-Indizierung: 4 Szenarien (delay=0/1/2, gemischte Delays mehrerer Envs im selben
+    global fortschreitenden Puffer) — alle bestanden, korrekt verzögerte Reads bestätigt.
+  - IMU-Integration: 3 Szenarien (Sprungantwort ohne Rauschen konvergiert stabil und zeigt die
+    erwartete strukturelle Unterschätzung durch den Leak-Faktor; Bias wächst im Mittel über 30
+    Seeds nachweislich mit der Zeit, echte Random-Walk-Charakteristik bestätigt statt stationärem
+    Rauschen; bleibt trotz Drift über 5000 Steps in plausiblem Wertebereich, keine Divergenz).
+    Eigener Testfehler unterwegs gefunden und behoben (globaler random-Modul-Seed-Zustand
+    zwischen zwei Testaufrufen kollidierte — mit isoliertem random.Random(seed)-Objekt pro
+    Aufruf behoben, kein Bug in der Env-Logik selbst).
+  - Default-Verhalten (enable_action_latency=False, lin_vel_estimation_mode="ground_truth")
+    explizit als verhaltensneutral gegenüber dem Vor-Session-Stand bestätigt: _apply_action()
+    nutzt weiterhin direkt _processed_actions, _compute_lin_vel_observation() läuft exakt den
+    alten Inline-Pfad — der immer mitlaufende Ringpuffer-Schreibvorgang hat keinen Effekt auf das
+    tatsächliche Verhalten bei deaktiviertem Flag.
+
+
+--------------------------------------------------------------------------------
+12. GEÄNDERTE DATEIEN DIESER SESSION
 --------------------------------------------------------------------------------
 
 Geändert:
   source/.../phantomx_thesis_env_cfg.py
     -> EventCfg.physics_material: Reibung auf Gummi-auf-Parkett angepasst (Punkt 4)
-    -> neue Felder swing_foot_duration_target/swing_quality_bonus_scale (Punkt 8)
+    -> swing_quality_bonus-Felder eingeführt (Punkt 8) UND wieder vollständig entfernt (Punkt 11)
+       — Netto-Effekt an diesem Block: KEINE Änderung gegenüber Session-Start.
+    -> NEU (Punkt 11.2, bleibt bestehen): Cfg-Block "SIM-TO-REAL GAP MODELING" —
+       enable_action_latency/action_latency_steps_range/lin_vel_estimation_mode/
+       lin_vel_imu_bias_std/lin_vel_imu_noise_std/lin_vel_imu_leak, alle Defaults
+       verhaltensneutral (deaktiviert bzw. "ground_truth").
   source/.../phantomx_thesis_env.py
-    -> neuer State self._swing_peak_height/self._previous_swing_contact_bool im __init__,
-       Reset-Logik in _reset_idx(), neue swing_quality_bonus-Formel in _get_rewards(),
-       neuer _episode_sums-Key (Punkt 8)
+    -> swing_quality_bonus-State/Formel/Logging eingeführt (Punkt 8) UND wieder vollständig
+       entfernt (Punkt 11) — Netto-Effekt: KEINE Änderung an diesem Teil gegenüber
+       Session-Start. Der bereits vor dieser Session bestehende swing_foot_height-Term ist
+       unverändert aktiv geblieben.
+    -> NEU (Punkt 11.2, bleibt bestehen): Action-Latency-Ringpuffer (__init__, _pre_physics_step,
+       _apply_action, _reset_idx) und _compute_lin_vel_observation() (IMU-Integrations-Modus für
+       lin_vel_b) — beide additiv, per Default deaktiviert/unverändertes Verhalten.
 
 Neu:
   logs/2026-07-24_session_history.txt (dieser Log)
+  /tmp/claude-0/.../scratchpad/prompt_fix_last_actions_bug.md (Scratchpad, NICHT Teil des
+  Projekt-Repos) — eigenständiger Prompt für einen separaten Claude-Code-Chat im echten
+  ROS2-Workspace, um den last_actions-EMA-Bug dort zu beheben (siehe Punkt 11.2).
 
 NICHT verändert (nur analysiert/beraten):
   joint_accel_reward_scale/action_rate_reward_scale — User hat selbst mehrfach angepasst
   während der Session, keine Änderung von Claude Code an diesen beiden Feldern in dieser Session.
+  ROS2-Deployment-Dateien (phantomx_policy_simulation_interface.py/
+  phantomx_policy_real_data_interface.py) — bewusst NICHT in diesem Workspace verändert, da die
+  hier vorliegende Kopie veraltet ist (kein EMA/Rate-Limiting enthalten); Fix als Prompt an
+  separaten Chat übergeben statt hier blind auf eine nicht-aktuelle Datei angewendet.
 
 
 --------------------------------------------------------------------------------
-10. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+13. OFFENE PUNKTE FÜR NÄCHSTE SESSION
 --------------------------------------------------------------------------------
 
-1. swing_quality_bonus_scale weiterhin bei 0.0 — Rohwert (Episode_Reward/swing_quality_bonus)
-   unter aktuellem Verhalten beobachten, dann aktivieren (kein konkreter Startwert-Vorschlag
-   bisher gemacht, analog zum swing_foot_height-Vorgehen ggf. 1.0-3.0 als ersten Test).
-2. swing_foot_duration_target=0.5s ist unverifiziert — per TensorBoard beobachten, ob das
-   überhaupt regelmäßig erreichbar ist bei aktuellem velocity_limit=0.8 rad/s, oder ob der
-   Schwellenwert zu hoch angesetzt ist (Term würde dann nie/kaum auslösen).
-3. User-These aus Punkt 6 (joint_accel fördert Stillstand) bleibt TEILWEISE ungeklärt — der
+1. swing_quality_bonus wurde komplett zurückgebaut (Punkt 11) — falls die zugrundeliegende
+   Idee (Höhe+Dauer gekoppelt) später erneut verfolgt werden soll, ist dieser Log-Eintrag
+   (Abschnitte 7/8) die vollständige Design-Referenz für eine Neu-Implementierung.
+2. swing_foot_height_reward_scale=3.0 bleibt aktiv und unverändert — Rohwert weiter per
+   TensorBoard (Episode_Reward/swing_foot_height) beobachten.
+3. Bestandsbug-Verdacht self._die_body_ids (Punkt 9, _TRIPOD_A/_TRIPOD_B potenziell falsch
+   zugeordnet) weiterhin nicht auf GPU-Maschine verifiziert — Diagnose-Snippet für
+   find_bodies()-Reihenfolgenvergleich wurde bereitgestellt, aber noch nicht vom User ausgeführt.
+4. Gravel/Terrain-Rauschen auf der Flat-Trainingsvariante wurde als sinnvolle, aber erst NACH
+   abgeschlossenem swing_foot_height-Tuning-Zyklus zu verfolgende Idee eingestuft (Punkt 10) —
+   nicht umgesetzt, nur analysiert.
+5. User-These aus Punkt 6 (joint_accel fördert Stillstand) bleibt TEILWEISE ungeklärt — der
    entscheidende Vergleichslauf (aktueller Stand: action_rate=-0.05 UND joint_accel aktiv
    gleichzeitig) wurde noch nicht gefahren/analysiert. Empfehlung aus der Analyse: einzeln
    testen (nur action_rate ODER nur joint_accel verschärfen), bevor beide gleichzeitig scharf
    geschaltet werden.
-4. Optionen 1/2 aus Punkt 7 (Jerk-Penalty, Wechselzahl-Penalty) nicht umgesetzt, nur benannt —
-   nur bei Bedarf nachträglich, falls Option 3 (Amplitude-Bonus, noch nicht umgesetzt) und
-   Option 4 (jetzt umgesetzt) nicht ausreichen.
-5. Bestandsbug-Verdacht aus Log 07-23 (self._die_body_ids ohne preserve_order,
-   _TRIPOD_A/_TRIPOD_B potenziell falsch zugeordnet) weiterhin nicht auf GPU-Maschine
-   verifiziert.
-6. Alle aus Log 07-23 bereits offenen Punkte, die hier nicht behandelt wurden, bleiben
+6. Optionen 1/2 aus Punkt 7 (Jerk-Penalty, Wechselzahl-Penalty) nicht umgesetzt, nur benannt —
+   nur bei Bedarf nachträglich, falls Option 3 (Amplitude-Bonus, noch nicht umgesetzt) sich als
+   nötig erweist.
+7. Alle aus Log 07-23 bereits offenen Punkte, die hier nicht behandelt wurden, bleiben
    unverändert offen (entropy_loss_scale-Langzeit-Vergleich, Kernel-Verengung nur beraten,
    Thesis-Testmatrix-Duplikat, kein Git-Commit über den weiterhin wachsenden uncommitteten
    Stand).
+8. last_actions-EMA-Bugfix (Punkt 11.2) wurde NICHT in diesem Workspace umgesetzt, sondern nur
+   als eigenständiger Prompt für einen separaten Claude-Code-Chat im echten ROS2-Workspace
+   geschrieben — muss dort noch angewendet und verifiziert werden.
+9. enable_action_latency/lin_vel_estimation_mode="imu_integration" (Punkt 11.2) sind implementiert,
+   aber noch NIE mit aktiviertem Flag trainiert worden — nächster Schritt ist ein Testlauf mit
+   enable_action_latency=True (Startwert action_latency_steps_range=(0,2) unverändert lassen) UND
+   separat ein Testlauf mit lin_vel_estimation_mode="imu_integration", JEWEILS EINZELN aktiviert
+   (nicht gleichzeitig mit anderen neuen Randomisierungs-Achsen), um Trainingsstabilität und
+   Auswirkung auf Episode_Reward/track_lin_vel_xy_exp separat beurteilen zu können.
+10. lin_vel_imu_bias_std/lin_vel_imu_noise_std/lin_vel_imu_leak-Werte sind unverifizierte
+    Startwerte (übernommen aus der Analyse/realen ROS2-Pipeline-Konstante 0.99), nicht empirisch
+    gegen echte IMU-Messdaten kalibriert (siehe Sim-to-Real-Gap-Bericht, Empfehlung "empirische
+    Kalibrierungsmessung").
+11. Von den ursprünglichen Top-5-Empfehlungen der Gap-Analyse sind Punkt 4 (Push-Perturbationen)
+    und Punkt 5 (PD-Gains/Effort-Limits randomisieren) noch NICHT umgesetzt — nur Punkt 2
+    (Latenz) und Punkt 3 (lin_vel_b-Realismus) wurden in dieser Session umgesetzt.
 
 ================================================================================
