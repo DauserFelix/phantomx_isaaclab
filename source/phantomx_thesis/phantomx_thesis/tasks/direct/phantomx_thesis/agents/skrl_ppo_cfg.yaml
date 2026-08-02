@@ -1,4 +1,4 @@
-seed: 42
+seed: 2
 
 models:
   separate: False
@@ -17,7 +17,7 @@ models:
     output: ACTIONS
   value:
     class: DeterministicMixin
-    clip_actions: False
+    clip_actions: False 
     network:
       - name: net
         input: OBSERVATIONS

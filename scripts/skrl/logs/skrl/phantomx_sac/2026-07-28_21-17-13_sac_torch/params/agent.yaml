@@ -1,0 +1,97 @@
+seed: 42
+models:
+  separate: true
+  policy:
+    class: GaussianMixin
+    clip_actions: false
+    clip_log_std: true
+    min_log_std: -5.0
+    max_log_std: 2.0
+    initial_log_std: -1.9
+    network:
+    - name: net
+      input: OBSERVATIONS
+      layers:
+      - 128
+      - 128
+      activations: elu
+    output: ACTIONS
+  critic_1:
+    class: DeterministicMixin
+    clip_actions: false
+    network:
+    - name: net
+      input: concatenate([OBSERVATIONS, ACTIONS])
+      layers:
+      - 128
+      - 128
+      activations: elu
+    output: ONE
+  critic_2:
+    class: DeterministicMixin
+    clip_actions: false
+    network:
+    - name: net
+      input: concatenate([OBSERVATIONS, ACTIONS])
+      layers:
+      - 128
+      - 128
+      activations: elu
+    output: ONE
+  target_critic_1:
+    class: DeterministicMixin
+    clip_actions: false
+    network:
+    - name: net
+      input: concatenate([OBSERVATIONS, ACTIONS])
+      layers:
+      - 128
+      - 128
+      activations: elu
+    output: ONE
+  target_critic_2:
+    class: DeterministicMixin
+    clip_actions: false
+    network:
+    - name: net
+      input: concatenate([OBSERVATIONS, ACTIONS])
+      layers:
+      - 128
+      - 128
+      activations: elu
+    output: ONE
+memory:
+  class: NStepMemory
+  memory_size: 125000
+  n_steps: 3
+  replacement: true
+agent:
+  class: CustomSAC
+  gradient_steps: 1
+  batch_size: 2048
+  discount_factor: 0.97
+  polyak: 0.005
+  learning_rate: 0.0003
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
+  observation_preprocessor: RunningStandardScaler
+  observation_preprocessor_kwargs: {}
+  state_preprocessor: null
+  state_preprocessor_kwargs: null
+  random_timesteps: 8000
+  learning_starts: 8000
+  grad_norm_clip: 0.5
+  learn_entropy: true
+  initial_entropy_value: 0.5
+  target_entropy: -9.0
+  mixed_precision: false
+  experiment:
+    directory: /workspace/projects/phantomx_thesis/scripts/skrl/logs/skrl/phantomx_sac
+    experiment_name: 2026-07-28_21-17-13_sac_torch
+    write_interval: auto
+    checkpoint_interval: auto
+trainer:
+  class: SequentialTrainer
+  timesteps: 600000
+  environment_info: log
+  close_environment_at_exit: false

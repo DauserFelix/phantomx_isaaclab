@@ -1,0 +1,424 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC) + ROS2/Gazebo Sim-to-Sim
+Datum: 2026-07-31
+Projekt: phantomx_thesis (Isaac Lab + SKRL) + ros2_ws (ROS2/Gazebo Deployment)
+Fortsetzung von logs/2026-07-28_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. VOLLSTÄNDIGES STUDIUM ALLER 10 BISHERIGEN SESSION-LOGS + AGENT-EVALUATION-REPORT
+--------------------------------------------------------------------------------
+
+Auftrag: alle Dateien in logs/ studieren, um die Projekthistorie zu verstehen. Alle 10 Logs
+(2026-07-01 bis 2026-07-28) sowie agent_evaluation_report.txt vollständig gelesen, dazu
+logs/merge_files/ und logs/phantomx_py_file/ gesichtet. Kompakte Zusammenfassung der
+Kernthemen gegeben (PPO-σ-Explosion als roter Faden, SAC-Bugfixes, Terrain-Curriculum,
+Reward-Design-Iterationen, Sim-to-Real-Gap-Arbeit). Keine Code-Änderung, reine Aufnahme.
+
+
+--------------------------------------------------------------------------------
+2. RATE-LIMITER-FIX IN phantomx_policy_simulation_interface.py VERIFIZIERT (ROS2, separates
+   Verzeichnis /workspace/ros2_ws/)
+--------------------------------------------------------------------------------
+
+User legte eine externe Fix-Beschreibung vor: policy_action_to_motor_commands() habe die
+Gelenk-Bewegungsgeschwindigkeit vorher gegen den zuletzt selbst gesendeten Sollwert
+(_prev_sent_q_target) begrenzt statt gegen die echte gemessene Ist-Position — dadurch baute
+sich bei 50Hz ein Rückstand auf (empirisch 56,5% der Steps mit >0.05rad Lag, bis 0.97rad).
+Fix: Referenzpunkt auf self.joint_pos_rad (echte Ist-Position) umgestellt, _prev_sent_q_target
+komplett entfernt.
+
+VERIFIKATION (gegen echten Trainings-Code, phantomx_thesis_env.py:203-245): bestätigt korrekt.
+_pre_physics_step()/_apply_action() setzen in Isaac Lab jeden Schritt ein komplett neues
+Positionsziel (set_joint_position_target()), OHNE jede Delta-/Rampen-Logik im Trainingscode
+selbst — die Geschwindigkeitsbegrenzung entsteht ausschließlich dadurch, dass PhysX' interner
+PD-Regler die ECHTE physische Position nur begrenzt schnell dem (frei springenden) Ziel
+hinterherzieht. Der neue ROS2-Code bildet das jetzt korrekt nach.
+
+NEBENFUND WÄHREND DER VERIFIKATION (führte zu Punkt 3): das im Fix-Kommentar zitierte
+"Isaac Labs velocity_limit=0.8 rad/s" als Kalibrierungsgrundlage für max_action_delta ist
+selbst fraglich — siehe Punkt 3.
+
+
+--------------------------------------------------------------------------------
+3. BUG GEFUNDEN: velocity_limit VS. velocity_limit_sim IN phantomx.py (isaaclab_assets) —
+   0.8 rad/s WAR NIE WIRKSAM, REAL WIRKSAM IST DER URDF-FALLBACK ≈5.6549 rad/s
+--------------------------------------------------------------------------------
+
+Ausgangsfrage: macht joint_velocity_limit_rad_s=5.65 im ROS2-Interface Sinn, oder ist 0.8 (der
+in isaaclab_assets/robots/phantomx.py:97/104/111 stehende ImplicitActuatorCfg-Wert für alle 3
+Aktuator-Gruppen) die richtige Referenz?
+
+VERIFIZIERTE KETTE (gegen echten Isaac-Lab-Quellcode, /workspace/isaaclab/):
+  1. phantomx.py setzt velocity_limit=0.8 (OHNE _sim-Suffix), velocity_limit_sim bleibt None.
+  2. ImplicitActuator.__init__ (actuator_pd.py:81-91): da velocity_limit_sim None UND
+     velocity_limit gesetzt ist -> Warnung geloggt ("previously ... not getting used by
+     implicit actuators ... we continue to not use it") UND cfg.velocity_limit wird explizit
+     auf None VERWORFEN.
+  3. ActuatorBase.__init__ (actuator_base.py:180,192-194): da cfg.velocity_limit_sim None ist
+     -> self.velocity_limit_sim wird auf den beim Konstruktor übergebenen USD-Wert gesetzt.
+  4. articulation.py:1627: self._data.joint_vel_limits = root_physx_view.get_dof_max_velocities()
+     — der beim USD-Import AUS DEM URDF übernommene Wert.
+  5. full_phantom_isaacsim.urdf: <limit effort="2.8" velocity="5.6548668" .../> für alle 18
+     Gelenke (Hardware-/AX-12A-Limit).
+  6. articulation.py:1773: write_joint_velocity_limit_to_sim(actuator.velocity_limit_sim, ...)
+     schreibt GENAU diesen URDF-Wert tatsächlich an den PhysX-Solver.
+
+ERGEBNIS: PhysX begrenzt die reale Trainings-Gelenkgeschwindigkeit effektiv auf ≈5.65 rad/s,
+NICHT auf die im Cfg stehenden 0.8 rad/s — ein stiller Bug im TRAININGS-Code selbst
+(phantomx.py), unabhängig vom ROS2-Interface. Gleicher Bug-Typ wie mehrfach in der
+Projekthistorie (hidden_dims, memory.replacement, totes movement_speed_x-Feld).
+
+EMPIRISCHE GEGENPRÜFUNG anhand zwei echter Isaac-Lab-Traces (play.py --record_trace,
+2026-07-28_21-17-13_sac.npz und 2026_07_28_13_17_46_ppo.npz, Perzentile von |joint_vel| über
+alle 18 Gelenke berechnet, da kein Python/numpy in dieser Sandbox verfügbar war -> .npz per
+unzip entpackt, .npy-Header/Rohdaten per Perl geparst):
+
+  Perzentil   SAC-Trace   PPO-Trace
+  50. (Median)   1.37        1.44
+  90.            2.79        2.94
+  95.            3.21        3.32
+  99.            5.27        4.37
+  99.9.         14.11       12.06
+  Maximum       30.59       33.58
+  Mean           1.55        1.60   [alle Werte rad/s]
+
+BEFUND: 95./99. Perzentil (~3.2-5.3 rad/s) liegt nahe am URDF-Fallback (5.65), NICHT nahe an
+0.8 — bestätigt empirisch, dass der Bug real ist und die Policy tatsächlich mit dem höheren,
+ungewollten Limit trainiert wurde. Große Lücke zwischen P99 (~5) und P99.9/Max (12-34) spricht
+für seltene Reset-/Substep-Artefakte bei den Extremwerten, keine reguläre Bewegung — P99.9/Max
+sind daher KEINE sinnvolle Kalibrierungsreferenz.
+
+WICHTIGE PRÄZISIERUNG (User-Einwand, berechtigt): weder 0.8 (nie wirksam) noch 5.65
+(URDF-Hardware-Maximum, nicht zwingend das tatsächlich trainierte Geschwindigkeitsverhalten)
+sind sauber hergeleitete Referenzgrößen für den ROS2-Rate-Limiter — beide sind Config-Werte,
+kein Abbild der echten joint_vel-Verteilung. Empfehlung stattdessen: max_action_delta (bzw.
+joint_velocity_limit_rad_s) direkt aus einem hohen Perzentil (95./99., NICHT Mittelwert/Std
+und NICHT Maximum) der echten Trainings-Trace-Verteilung kalibrieren, mit Faktor=1 statt eines
+unbegründeten Multiplikators (im ROS2-Code stand zwischenzeitlich Faktor 15, dann 5 — beides
+nie hergeleitet).
+
+STATUS: Bug identifiziert und mechanistisch verifiziert (Quellcode-Kette vollständig gelesen),
+EMPIRISCH über echte Traces bestätigt (Perzentile passen zu URDF-Fallback, nicht zu 0.8). NOCH
+NICHT gefixt — ein Fix (velocity_limit_sim=0.8 explizit setzen) hätte eine ECHTE
+Trainingsauswirkung (neue, bisher nie wirksame Geschwindigkeitsbegrenzung würde ins Training
+eingeführt) und müsste vor Umsetzung bewusst entschieden + neu trainiert werden, siehe Punkt 6.
+
+
+--------------------------------------------------------------------------------
+4. VOLLSTÄNDIGE ACTION-PIPELINE-ANALYSE: POLICY-OUTPUT -> GELENKBEWEGUNG, BEGRENZUNGEN JE STUFE
+--------------------------------------------------------------------------------
+
+User-Frage: was gibt die Policy aus, wie wird das zu joint_vel/Drehmoment, und ist das
+begrenzt? Gegen echten Code (phantomx_thesis_env.py + Isaac-Lab-Actuator-Quellcode)
+durchgegangen:
+
+  1. Policy-Output: roher Skalar pro Gelenk (18), kein Drehmoment/keine Geschwindigkeit im
+     Action-Space — reine Zielposition-Delta-Kodierung.
+  2. Umrechnung (_pre_physics_step): q_target = q_def + action_scale*action, geklemmt auf
+     q_def ± joint_pos_limit (bei strict_action_pipeline=True, aktuell PPO+SAC).
+  3. set_joint_position_target() schreibt NUR einen Buffer (Docstring bestätigt: "does not
+     apply ... only fills the buffers"), erst write_data_to_sim() -> root_physx_view.
+     set_dof_position_targets() gibt es tatsächlich an PhysX weiter.
+  4. PhysX (ImplicitActuator, "implicit" weil PhysX selbst die PD-Regelung übernimmt) berechnet
+     intern Drehmoment ≈ Kp*(q_target-q_ist) + Kd*(0-q̇_ist), Kp=10.0, Kd=2.0.
+
+BEGRENZUNGEN JE GRÖSSE:
+  - Position: HART begrenzt (echtes torch.clamp in Python, joint_pos_limit=1.0 rad) —
+    zuverlässig.
+  - Drehmoment: HART begrenzt (effort_limit_sim, korrekt aus effort_limit=1.5 übernommen, KEIN
+    _sim-Suffix-Bug hier) — PhysX kappt das PD-Drehmoment hart auf ±1.5 Nm.
+  - Geschwindigkeit: NUR WEICH begrenzt — kein Software-Clip im Env-Code, sondern ein
+    kraftbasiertes PhysX-Regelziel (velocity_limit_sim, siehe Punkt 3 für den tatsächlichen
+    Wert). Laut Isaac-Lab-Doku "the physics engine will actually try to brake" — kein hartes
+    Delta-Cap, kann kurzzeitig überschritten werden (erklärt die Ausreißer bis 30+ rad/s in den
+    echten Traces trotz nominal niedrigerer Solver-Grenze).
+
+
+--------------------------------------------------------------------------------
+5. LABPLOT-EXPORT-SKRIPT FÜR NPZ-TRACES (npz_to_csv_for_labplot.py, NUR SCRATCHPAD)
+--------------------------------------------------------------------------------
+
+User wollte Isaac-Lab- und GZ2-Traces grafisch abbilden. Nach Rückfrage: LabPlot (KDE, freie
+Alternative zu MATLAB) statt MATLAB gewählt. Da LabPlot .npz nicht nativ liest, Python-Skript
+geschrieben, das sowohl Isaac-Lab-Traces (joint_pos/joint_vel/root_ang_vel_b/etc. als eigene
+Arrays) als auch GZ2-Traces (step+obs[N,66], aus sensor_to_policy_obs()-Layout aufgeteilt) als
+CSV exportiert: Zeitreihen pro Segment, Pro-Gelenk-CSVs (18 Spalten, Policy-Reihenfolge), sowie
+eine joint_vel_abs_percentiles.csv (inkl. der Referenzwerte 0.8/5.6548668 aus Punkt 3) und eine
+flache joint_vel_abs_flat.csv für ein Histogramm direkt in LabPlot.
+
+STATUS: nur im Scratchpad
+(/tmp/claude-0/.../scratchpad/npz_to_csv_for_labplot.py), NICHT Teil des Projekt-Repos — reines
+Analyse-Hilfsmittel, User muss es selbst ausführen (kein Python in dieser Sandbox verfügbar,
+daher nicht hier getestet, nur gegen die echte .npz-Struktur der beiden vorhandenen ROS2-Traces
+verifiziert, siehe Punkt 3).
+
+
+--------------------------------------------------------------------------------
+6. PERZENTIL-BERECHNUNG VON |joint_vel| DIREKT AUS ECHTEN TRACES DURCHGEFÜHRT (siehe Punkt 3)
+--------------------------------------------------------------------------------
+
+Da kein Python in dieser Sandbox verfügbar war, wurden die beiden vorhandenen ROS2-Traces
+(/workspace/ros2_ws/src/phantomx_package/src/2026-07-28_21-17-13_sac.npz und
+2026_07_28_13_17_46_ppo.npz) per unzip entpackt (.npz ist ein ZIP-Container) und die
+enthaltenen joint_vel.npy-Rohdaten per handgeschriebenem Perl-Parser (NumPy-Header manuell
+geparst: descr/fortran_order/shape, danach Float32-little-endian-Werte ausgelesen) analysiert.
+Ergebnis siehe Tabelle in Punkt 3 — Werte für beide Algorithmen konsistent, gute
+Kreuzbestätigung. Temporäre Extraktion nach Berechnung wieder gelöscht.
+
+
+--------------------------------------------------------------------------------
+7. KALIBRIERUNGS-PROMPT FÜR DEN ANDEREN ROS2-CLAUDE-CODE-CHAT GESCHRIEBEN
+--------------------------------------------------------------------------------
+
+Auf Wunsch: Prompt für einen separaten Claude-Code-Chat im echten ROS2-Workspace geschrieben
+(prompt_gz2_parameter_calibration.md, NUR Scratchpad), der einen Parameter-Kalibrierungs-
+Workflow beschreibt: ema_alpha und joint_velocity_limit_rad_s/max_action_delta-Faktor im
+ROS2-Interface so kalibrieren, dass die STATISTISCHE VERTEILUNG (mean/std pro Segment via
+compare_gz2_observations.py) zwischen Isaac-Lab-Referenz-Trace und GZ2-Lauf konvergiert.
+
+EXPLIZIT ALS FALSCHER ANSATZ AUSGESCHLOSSEN (im Prompt begründet): Policy-Output 1:1-Matching
+zwischen den beiden Sessions — Isaac Lab und GZ2 sind nicht step-synchronisiert, ein Output-
+Matching würde zwei aus anderen Gründen bereits divergierende Trajektorien künstlich
+zusammenzwingen (Overfitting auf einen einzelnen Trace statt echter physikalischer
+Kalibrierung). Dieselbe Einordnung wie bereits in Log 2026-07-28 Punkt 19 dokumentiert.
+
+Enthält: Schritt 0 (Verifikation des aktuellen Code-Stands, da ema_alpha/joint_velocity_
+limit_rad_s zum Zeitpunkt der Prompterstellung NICHT CLI-parametrisierbar waren, nur
+Konstruktor-Defaults), CLI-Parametrisierbarkeit als Voraussetzung, ein Auswertungs-/
+Vorschlagsskript-Konzept mit konkreten nächsten Testwerten (kein vages "erhöhen/senken"), ein
+Sweep-Protokoll (calibration_sweep_log) für Nachvollziehbarkeit über mehrere Iterationen, ein
+Abbruchkriterium (Faktoren <2.0 stabil über ≥2 Iterationen).
+
+STATUS: Prompt geschrieben, User hat ihn (vermutlich) an den anderen Chat weitergegeben — im
+Verlauf dieser Session tauchte bereits ein vom anderen Chat geschriebenes
+suggest_calibration.py auf (siehe Punkt 8), das erkennbar auf diesem Prompt aufbaut.
+
+
+--------------------------------------------------------------------------------
+8. REVIEW: suggest_calibration.py (vom anderen ROS2-Chat geschrieben, IDE-Selektion vorgelegt)
+--------------------------------------------------------------------------------
+
+User legte ein vom anderen Claude-Code-Chat geschriebenes Kalibrierungs-/Auswertungsskript zur
+Prüfung vor. Gegen echten aktuellen Interface-Code
+(phantomx_policy_simulation_interface.py) verifiziert, NICHT nur das Skript selbst gelesen.
+
+POSITIV BEWERTET:
+  - lin_vel_b-Sperrbedingung (verhindert, dass ema_alpha/Rate-Limiter allein auf ang_vel_b/
+    joint_vel optimiert werden, ohne zu prüfen ob dabei die reale Vorwärtsgeschwindigkeit
+    einbricht) — genau die Absicherung, die im ursprünglichen Prompt (Punkt 7) noch fehlte.
+  - commands-Segment korrekt ausgeschlossen (bekanntes Hardcoding-Artefakt).
+  - Perzentil-basierter Ansatz (P99, nicht P99.9/Max) für joint_velocity_limit_rad_s deckt sich
+    mit der in Punkt 3 gemeinsam hergeleiteten Empfehlung.
+
+DREI FUNDE:
+  1. [KRITISCH, Prämisse nicht erfüllt] Skript geht von --current-ema-alpha/--current-velocity-
+     limit/--current-delta-factor als tatsächlich beim GZ2-Lauf WIRKSAMEN Parametern aus — aber
+     im aktuellen Interface-Code sind weder ema_alpha/joint_velocity_limit_rad_s noch ein
+     max_action_delta_factor als ROS2-Parameter deklariert (self.declare_parameter fehlt,
+     max_action_delta ist weiterhin eine hartcodierte Formel mit Faktor 5, Zeile ~139). Die vom
+     Skript vorgeschlagenen "--ros-args -p max_action_delta_factor:=..."-Kommandos würden vom
+     aktuellen Interface-Stand STILLSCHWEIGEND ignoriert (ROS2 verwirft unbekannte -p-Parameter
+     ohne Fehler) — genau Schritt A aus dem ursprünglichen Prompt (Punkt 7) muss zuerst
+     nachgezogen werden, bevor das Skript sinnvoll nutzbar ist.
+  2. [Logikfehler] capped-Check vergleicht joint_vel-Extremwerte (rad/s) direkt gegen
+     current_velocity_limit (rad/s) — aber die tatsächlich wirksame Rate-Limiter-Grenze ist
+     max_action_delta = Faktor*joint_velocity_limit_rad_s/freq, eine Positionsänderung PRO STEP
+     (rad/Step), keine Geschwindigkeit in rad/s. Die Einheiten passen nicht direkt zusammen —
+     Vergleich vermischt zwei unterschiedlich benannte, aber unterschiedliche Größen.
+  3. [klein] lin_vel_b-Ratio nutzt _seg_stats()' über x/y/z gepoolten abs_mean statt der
+     vorzeichenbehafteten x-Komponente — Seitwärtsrauschen könnte einen echten
+     Vorwärtsgeschwindigkeits-Einbruch kaschieren.
+
+STATUS: Review als Text an User zurückgegeben, KEINE Code-Änderung an suggest_calibration.py in
+dieser Session (liegt im ROS2-Workspace, wird vom anderen Chat betreut). User hat noch nicht
+entschieden, ob die Korrektur hier oder im anderen Chat erfolgen soll.
+
+
+--------------------------------------------------------------------------------
+9. ANALYSE (KEINE CODE-ÄNDERUNG): DREHEN AUF DER STELLE TRAINIEREN — MACHBARKEIT + AUFWAND
+--------------------------------------------------------------------------------
+
+User-Frage: kann die Spider trainiert werden, sich auf der Stelle (ohne Vorwärtsbewegung) nach
+links/rechts zu drehen? Explizit als reine Analyse angefordert, kein Code.
+
+BEFUND (gegen aktuellen Code verifiziert):
+  - track_ang_vel_z_exp existiert bereits als eigener, von track_lin_vel_xy_exp unabhängiger
+    Reward-Term — kein neuer Reward-Term nötig für die Grundidee.
+  - movement_penalty (_compute_movement_penalty) prüft AUSSCHLIESSLICH commands[:,0] (vx) — bei
+    vx=0 ist has_forward_command=False, velocity_deficit*0=0. Reines Drehen auf der Stelle wird
+    NICHT durch die Movement-Penalty bestraft, kein Zielkonflikt an dieser Stelle.
+  - yaw_rotation_speed_x existiert als Cfg-Feld, PPO-Curriculum setzt commands[:,2] bereits ab
+    350k Schritten — ABER IMMER gleichzeitig mit commands[:,0]=max_speed (Kurvenlaufen), NIE mit
+    vx=0. Das aktuelle Curriculum trainiert also Kurvenlaufen, nicht Drehen-auf-der-Stelle — ein
+    wichtiger, eigenständiger Unterschied (biomechanisch näher an "Schwenken" als an Gehen, bei
+    radialem Hexapod-Beinlayout vermutlich eigene Gangart nötig).
+  - Analoges Kernel-Risiko wie beim historisch dokumentierten "Steht-statt-Geht"-Problem und dem
+    nie umgesetzten Strafing-Plan (20.07.) plausibel: bei kleinem yaw_rotation_speed_x könnte
+    Stillstehen bereits einen Großteil des maximalen track_ang_vel_z_exp-Rewards bekommen —
+    vermutlich bräuchte es denselben Bootstrap-Trick (erst übertrieben hohes Yaw-Ziel, dann
+    runtertransferieren) wie bei SACs BOOTSTRAP_SPEED.
+
+DREI OPTIONEN BEWERTET (Aufwand/Risiko):
+  1. Zusätzlich, separate Env-Cfg-Variante: mittlerer Aufwand, geringes-mittleres Risiko.
+  2. Ins Gesamttraining integrieren (kombiniert mit Vorwärts-/Kurvenfähigkeit): höchster
+     Aufwand, höchstes Risiko (Catastrophic-Forgetting-Gefahr, "zu viel gleichzeitig ändern" —
+     historisch bereits mehrfach als Fehlerquelle identifiziert, siehe Log 07-09 Punkt 10).
+  3. Bestehende Policy weitertrainieren (--resume_step + neue Curriculum-Phase am Ende):
+     geringster Aufwand, technisch am saubersten vorbereitet (Infrastruktur existiert bereits
+     seit Log 07-12), mittleres Risiko für Degradation der bereits gelernten Vorwärtsfähigkeit.
+
+EMPFEHLUNG: Option 3 als pragmatischster Einstieg, Option 2 eher nicht als ersten Schritt.
+Offener Punkt: Kernel-Breite (ang_vel_kernel_width) bei kleinem Yaw-Ziel vor Umsetzung
+durchrechnen (analog zur historischen lin_vel-Kernel-Rechnung), um zu wissen ob ein
+Bootstrap-Trick von Anfang an nötig ist. NICHT UMGESETZT, nur analysiert.
+
+
+--------------------------------------------------------------------------------
+10. VOLLSTÄNDIGE METHODEN-ÜBERSICHT ALLER JE VERSUCHTEN OPTIMIERUNGSANSÄTZE ERSTELLT
+--------------------------------------------------------------------------------
+
+Auftrag: alle über die Projekthistorie ausprobierten Methoden zur Modelloptimierung auflisten,
+mit Status (aktiv/verworfen), gegen den AKTUELLEN Code verifiziert statt nur den Logs vertraut
+(git status/mehrere gezielte grep-Abfragen auf Config-Werte). Wichtige, beim Verifizieren
+festgestellte Abweichungen von der letzten Log-Dokumentation (24.07./28.07.):
+  - movement_speed_x jetzt 0.10 (Logs zuletzt: 0.15)
+  - target_base_height jetzt 0.10 (Logs zuletzt: 0.11)
+  - initial_log_std jetzt -2.0 (in keinem Log explizit als Fix dokumentiert, aber im Code aktiv)
+  - joint_torque_reward_scale/joint_accel_reward_scale beide aktuell 0.0
+  -> bestätigt erneut das in Log 07-14 §1 benannte Muster: uncommittete/undokumentierte
+     Zwischenänderungen reißen die Log-Kette, Verifikation gegen den echten Code bleibt nötig.
+
+Vollständige Kategorien-Übersicht (Kurzfassung, Details siehe Chat-Antwort dieser Session):
+  1. PPO-σ-Explosion-Gegenmaßnahmen (clip_actions:True VERWORFEN, entropy_loss_scale 0.005
+     AKTIV, initial_log_std -2.0 AKTIV, max_log_std-Senkung NIE UMGESETZT) — Problem laut
+     letzter Analyse (Log 07-28, Lauf 27.07.) weiterhin ungelöst.
+  2. SAC-Kernbugfixes ("4 Fixes" + memory.replacement + N-Step-Wraparound-Fix) — alle AKTIV.
+  3. Reward-Design gegen "Steht-statt-Geht" (target_entropy, Kernel-Breiten, Movement-Penalty-
+     Symmetrie-Fix, SAC-Bootstrap-Curriculum) — alle AKTIV.
+  4. Reward-Terme im Zeitverlauf: femur_flip_penalty ENTFERNT, foot_reach_l2 ENTFERNT (gleiche
+     Session), swing_foot_height AKTIV, swing_quality_bonus KOMPLETT ZURÜCKGEBAUT,
+     joint_accel/joint_torque aktuell BEIDE 0.0 (deaktiviert).
+  5. Curriculum-Mechanismen (Velocity-Curriculum, Terrain-Curriculum inkl. 2 aufeinander-
+     folgender Bugfixes, Yaw-Curriculum) — alle AKTIV. Strafing+Kurvenlaufen-Plan NIE
+     UMGESETZT.
+  6. Sim-to-Real-Maßnahmen (Sensorrauschen, Reibungskalibrierung, strict_action_pipeline für
+     beide Algorithmen, Action-Latenz-Ringpuffer) — AKTIV; IMU-Integrations-Modus für lin_vel_b
+     nach einem Testlauf WIEDER AUF ground_truth ZURÜCKGESETZT (Kollaps durch PPO-σ-Explosion
+     überlagert, kein sauberer Test möglich gewesen).
+  7. Netzwerkgröße-Experimente: SAC [512,256,128] AUSPROBIERT UND WIEDER AUF [128,128]
+     ZURÜCKGESETZT (unbegründetste, teuerste Änderung laut damaliger Tiefenanalyse).
+  8. Bereinigung/Diagnose: 44 Runs ohne Checkpoint gelöscht, agent_evaluation_report.txt erstellt
+     (NICHT aktualisiert seit 27./28.07.-Läufen).
+
+Zwei offene, bis heute unverifizierte Verdachtsmomente eingeordnet (kein "Methode"-Status,
+sondern potenzielle strukturelle Bugs): self._die_body_ids ohne preserve_order=True
+(Tripod-Zuordnung), velocity_limit-vs-velocity_limit_sim (siehe Punkt 3, HEUTE bestätigt).
+
+
+--------------------------------------------------------------------------------
+11. DIAGNOSE-SKRIPTE FÜR BEIDE OFFENEN VERDACHTSMOMENTE GESCHRIEBEN (NUR SCRATCHPAD)
+--------------------------------------------------------------------------------
+
+User-Auftrag: "Zwei offene Bugs verifizieren: preserve_order=True bei self._die_body_ids und
+velocity_limit vs. velocity_limit_sim in phantomx.py. Wenn einer real ist -> neu trainieren.
+Erst klären, dann Seed-Budget ausgeben." — als Priorisierungsregel erklärt: beide offenen
+strukturellen Fragen (Simulationsgrundlage selbst betreffend) sollen VOR dem Start des für die
+Thesis-Auswertung vorgesehenen, mehrfach geseedeten Trainings-Kontingents geklärt werden, da ein
+nachträglicher Fix bereits gefahrene Läufe entwerten würde (dieselbe Lehre wie in Log 07-09
+Punkt 10: Bugfixes vor Tuning-Experimenten, nicht gleichzeitig).
+
+Da beide Verdachte laufendes Isaac Sim (CUDA/PhysX) brauchen (in dieser Sandbox nicht
+verfügbar), zwei eigenständige, ausführbare Diagnose-Skripte geschrieben, für die GPU-Maschine
+gedacht:
+
+  verify_die_body_ids_order.py:
+    Instanziiert Template-Phantomx-Thesis-PPO-Direct-v0 mit num_envs=1 (keine Trainingswirkung,
+    kein Checkpoint nötig), ruft find_bodies() für die Tibia-Query zweimal auf (mit/ohne
+    preserve_order=True), vergleicht gegen die im Code angenommene Reihenfolge
+    (lf,lm,lr,rf,rm,rr). Bei bestätigtem Verdacht: berechnet automatisch die KORREKTEN
+    _TRIPOD_A/_TRIPOD_B-Indizes für die tatsächliche Reihenfolge. Ordnet zusätzlich ein, welche
+    der 4 self._die_body_ids-Nutzungsstellen (foot_contact, tripod_gait, lazy_legs,
+    Termination) überhaupt betroffen wären — nur tripod_gait braucht echte
+    Positions-Semantik, die anderen 3 summieren nur und sind unbetroffen selbst falls der
+    Verdacht zutrifft.
+
+  verify_velocity_limit_bug.py:
+    Liest nach Env-Erzeugung direkt self._robot.data.joint_vel_limits aus (der Tensor, der laut
+    Punkt 3 tatsächlich an PhysX geschrieben wird) und vergleicht gegen beide Referenzwerte
+    (0.8 vs. 5.6548668 rad/s) mit torch.allclose. Zusätzlich: liest velocity_limit_sim/
+    velocity_limit direkt von den Actuator-Objekten (zweite, unabhängige Quelle) und fängt die
+    von Isaac Lab selbst geloggte Warnung ab (dritte, unabhängige Bestätigung). Gibt ein
+    eindeutiges BESTÄTIGT/FALSIFIZIERT/UNKLAR-Fazit inkl. Handlungsempfehlung aus.
+
+STATUS: beide Skripte liegen NUR im Scratchpad
+(/tmp/claude-0/.../scratchpad/verify_die_body_ids_order.py bzw. verify_velocity_limit_bug.py),
+NICHT im Projekt-Repo — User muss sie auf die GPU-Maschine kopieren (Sandbox-Pfad ist von dort
+nicht erreichbar) und mit
+  /workspace/isaaclab/isaaclab.sh -p verify_die_body_ids_order.py --headless
+  /workspace/isaaclab/isaaclab.sh -p verify_velocity_limit_bug.py --headless
+ausführen. NOCH NICHT ausgeführt/Ergebnis noch nicht vorliegend — Auswertung ist offener Punkt
+für die nächste Session.
+
+
+--------------------------------------------------------------------------------
+12. GEÄNDERTE/NEUE DATEIEN DIESER SESSION
+--------------------------------------------------------------------------------
+
+Im Haupt-Repo (phantomx_thesis): KEINE Code-Änderung — komplette Session war Analyse/
+Verifikation/Diagnose-Tooling, keine einzige .py/.yaml-Datei im Projekt selbst verändert.
+
+Im ROS2-Workspace (separates Verzeichnis, review-only, keine Änderung durch diese Session):
+  phantomx_policy_simulation_interface.py — Rate-Limiter-Fix bereits vom User/anderen Chat
+    umgesetzt vorgefunden (Punkt 2), hier nur verifiziert, nicht verändert.
+  suggest_calibration.py — vom anderen Chat geschrieben, hier nur reviewt (Punkt 8), nicht
+    verändert.
+
+Nur Scratchpad (kein Projekt-Artefakt):
+  npz_to_csv_for_labplot.py         — LabPlot-CSV-Export (Punkt 5)
+  prompt_gz2_parameter_calibration.md — Kalibrierungs-Prompt für den anderen ROS2-Chat (Punkt 7)
+  compute_joint_vel_percentile.py    — Perzentil-Skript (Python-Variante, letztlich per Perl
+                                        direkt in dieser Session ausgewertet, siehe Punkt 6)
+  verify_die_body_ids_order.py       — Diagnose-Skript Verdacht 1 (Punkt 11)
+  verify_velocity_limit_bug.py       — Diagnose-Skript Verdacht 2 (Punkt 11)
+
+Neu (Projekt-Repo):
+  logs/2026-07-31_session_history.txt (dieser Log)
+
+
+--------------------------------------------------------------------------------
+13. OFFENE PUNKTE FÜR NÄCHSTE SESSION
+--------------------------------------------------------------------------------
+
+1. WICHTIGSTER PUNKT: verify_die_body_ids_order.py UND verify_velocity_limit_bug.py auf der
+   GPU-Maschine ausführen (Punkt 11) — Ergebnis bestimmt, ob vor dem nächsten großen,
+   mehrfach geseedeten Trainings-Kontingent noch strukturelle Fixes nötig sind. Ausdrücklicher
+   User-Auftrag: "Erst klären, dann Seed-Budget ausgeben."
+2. Falls velocity_limit-Bug bestätigt (Punkt 3): Entscheidung nötig, ob velocity_limit_sim=0.8
+   explizit gesetzt wird (echte Trainingsauswirkung, Neutraining nötig) oder ob der bisher
+   real wirksame Wert (~5.65) als neue, akzeptierte Baseline übernommen wird (dann NUR der
+   ROS2-Rate-Limiter-Referenzwert anzupassen, kein Neutraining nötig). Diese Session hat
+   bewusst KEINE Entscheidung getroffen, nur den Sachverhalt aufgeklärt.
+3. Falls preserve_order-Bug bestätigt (Punkt 11): _TRIPOD_A/_TRIPOD_B mit den vom Skript
+   automatisch berechneten korrekten Indizes fixen — betrifft nur tripod_gait, andere 3
+   Nutzungsstellen von self._die_body_ids sind laut Analyse unbetroffen.
+4. suggest_calibration.py (Punkt 8): CLI-Parametrisierbarkeit von ema_alpha/
+   joint_velocity_limit_rad_s/max_action_delta_factor im ROS2-Interface muss ZUERST
+   nachgezogen werden (Schritt A aus dem ursprünglichen Prompt, Punkt 7), sonst laufen die vom
+   Skript vorgeschlagenen Parametersätze ins Leere. Außerdem: capped-Einheiten-Fehler (rad/s vs.
+   rad/Step) und lin_vel_b-Ratio-Berechnung (gepoolter Betrag statt vorzeichenbehaftete
+   x-Komponente) sollten vor produktivem Einsatz korrigiert werden — noch nicht entschieden, ob
+   hier oder im anderen ROS2-Chat.
+5. Drehen-auf-der-Stelle (Punkt 9): weiterhin nur Analyse, keine Umsetzung. Bei Fortsetzung:
+   Kernel-Breiten-Rechnung für ang_vel_kernel_width bei kleinem Yaw-Ziel zuerst durchführen,
+   Option 3 (Weitertrainieren vom bestehenden Checkpoint) als pragmatischster Einstieg markiert.
+6. joint_velocity_limit_rad_s im ROS2-Interface weiterhin auf dem alten Wert (5.65, URDF-
+   Fallback) — Empfehlung aus Punkt 3 (Perzentil-basierte Kalibrierung, ~5.0 rad/s aus P99,
+   Faktor auf 1 statt 5) noch nicht umgesetzt, hängt an Punkt 4 (CLI-Parametrisierbarkeit).
+7. Alle aus Log 07-28 bereits offenen Punkte, die hier nicht behandelt wurden, bleiben
+   unverändert offen (ang_vel_b-Befund über GZ2/Real-Data weiterhin ungeklärte Ursache,
+   joint_vel-Totalausfall-Frage bei einem früheren Real-Data-Lauf, Tibia-Load-Schwellwert-Idee,
+   kein Git-Commit über den weiterhin uncommitteten Stand seit Commit 1a2f6bc vom 27.07.).
+
+================================================================================

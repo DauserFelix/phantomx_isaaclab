@@ -573,5 +573,64 @@ NICHT verändert (nur analysiert/beraten):
 11. Von den ursprünglichen Top-5-Empfehlungen der Gap-Analyse sind Punkt 4 (Push-Perturbationen)
     und Punkt 5 (PD-Gains/Effort-Limits randomisieren) noch NICHT umgesetzt — nur Punkt 2
     (Latenz) und Punkt 3 (lin_vel_b-Realismus) wurden in dieser Session umgesetzt.
+12. NACHTRAG: User bat, enable_action_latency/lin_vel_estimation_mode NICHT nur als Opt-in-Flag
+    zu belassen, sondern als neuen STANDARD-Default zu aktivieren (statt sie einzeln per
+    Hydra-Override in separaten Trainingsläufen zu testen, wie zunächst empfohlen). Auf Nachfrage
+    per AskUserQuestion bestätigt: BEIDE gleichzeitig als Default, nicht nur eines. Umgesetzt in
+    phantomx_thesis_env_cfg.py: enable_action_latency Default False->True,
+    lin_vel_estimation_mode Default "ground_truth"->"imu_integration". Gilt automatisch für alle
+    4 Task-Varianten (PPO/SAC × Flat/Rough), da keine Subklasse diese Felder überschreibt. Damit
+    entfällt die zuvor empfohlene getrennte A/B-Testreihenfolge — jeder künftige Trainingslauf
+    (auch ohne jedes Hydra-Override) hat ab sofort beide Effekte gleichzeitig aktiv. Zum
+    Zurücksetzen auf das alte Verhalten (z.B. für einen expliziten Vergleichslauf):
+    env.enable_action_latency=False env.lin_vel_estimation_mode=\"ground_truth\" als
+    Hydra-Override übergeben. py_compile erneut fehlerfrei.
+13. episode_length_s (phantomx_thesis_env_cfg.py, PhantomxThesisEnvCfg-Basisklasse) von 40.0 auf
+    80.0 erhöht — User wollte längere Episoden als die beobachteten max. 2000 Steps (SAC-Lauf
+    2026-07-26_14-22-30 als Beispiel genannt). 2000 Steps ergaben sich aus episode_length_s=40.0
+    / (sim.dt=1/200 × decimation=4) = 40.0/0.02 = 2000; mit 80.0 sind es jetzt 4000 Steps.
+    decimation/sim.dt bewusst unverändert (bestimmen die 50Hz-Steuerungsfrequenz, nicht die
+    Länge). Geprüft, dass kein Code hartcodiert von 2000 oder episode_length_s=40.0 ausgeht — alle
+    Stellen (time_out-Termination, Episodenlängen-Randomisierung, Reward-Logging-Normierung,
+    Terrain-Curriculum-Distanzschwelle in _apply_terrain_curriculum) greifen dynamisch über
+    self.max_episode_length/self.max_episode_length_s, passen sich also automatisch an. Gilt
+    automatisch für alle 4 Task-Varianten (keine Subklasse überschreibt episode_length_s).
+    py_compile fehlerfrei. Hinweis an User: doppelt so lange Episoden bedeuten bei gleicher
+    num_envs auch ca. doppelte Wall-Clock-Zeit bis zur selben Anzahl PPO-Updates/SAC-Transitionen
+    — erwartet, kein Bug.
+14. ANALYSE Lauf 2026-07-27_15-11-56_ppo_torch (nur Analyse, User berichtete schlechten Mean
+    Reward/Timesteps): Cfg bestätigt ALLE neuen Maßnahmen dieser Session gleichzeitig aktiv
+    (episode_length_s=80.0, enable_action_latency=true, lin_vel_estimation_mode=imu_integration,
+    swing_foot_height_reward_scale=3.0, angepasste Reibung). TensorBoard-Auswertung: klarer
+    3-Phasen-Verlauf — (1) 0-366k plausibler Aufbau (track_lin_vel_xy_exp 0.14->7.6, tripod_gait
+    0.007->1.57), (2) 366k-540k Reward wächst weiter (Peak ~1069 bei 486k, best_agent.pt), ABER
+    Policy/Standard deviation steigt bereits seit Step 150000 unaufhaltsam über die aus früheren
+    Sessions bekannte kritische Schwelle σ≈0.242 (Nullstelle des Gaussian-Entropie-Gradienten),
+    (3) ab Step 570000 sichtbarer Kollaps (Reward 738->501->333, foot_contact 0.71->0.37,
+    tripod_gait 1.52->0.64), σ bei Trainingsende 1.32 (praktisch Zufallsverhalten bei
+    [-1,1]-Actionspace). FAZIT: identisches, bereits vor dieser Session bekanntes PPO-σ-
+    Explosionsmuster (entropy_loss_scale war bereits in einer früheren Session von 0.01 auf 0.005
+    reduziert — offenbar nicht ausreichend), NICHT durch die neuen Sim-to-Real-Maßnahmen
+    verursacht. Aber: da alle neuen Maßnahmen gleichzeitig liefen UND der σ-Kollaps alles
+    überlagert, ist dieser Lauf NICHT als sauberer Test für Latenz/IMU-Integration verwertbar —
+    bestätigt exakt das zuvor benannte "nicht alle gleichzeitig aktivieren"-Risiko.
+    avg_forward_speed_mps erreichte trotz Kollaps noch 0.093 m/s (über movement_speed_x=0.075-Ziel
+    zum damaligen Cfg-Stand), swing_foot_height blieb während des gesamten Laufs klar >0.
+    Empfehlung (nicht umgesetzt in diesem Analyseschritt): best_agent.pt (480k) statt 600k-Endstand
+    als Ergebnis werten; σ-Explosion vor jedem weiteren Lauf primär adressieren.
+15. USER-ENTSCHEIDUNG nach der Analyse: lin_vel_estimation_mode zurück auf "ground_truth" (war
+    "imu_integration"), enable_action_latency bleibt bei True — gezielter Rückbau NUR der
+    IMU-Integration, um für den nächsten Trainingslauf einen saubereren Vergleich zu bekommen
+    (Latenz-Effekt isoliert testen, ohne zusätzlich die IMU-Integration als zweite neue Variable).
+    Umgesetzt in phantomx_thesis_env_cfg.py (nur dieses eine Feld + Kommentar-Header
+    aktualisiert, lin_vel_imu_bias_std/noise_std/leak-Felder bleiben unverändert im Code stehen,
+    da lin_vel_estimation_mode="ground_truth" sie ohnehin nicht nutzt). WICHTIG: beim Lesen der
+    Datei vor dieser Änderung fielen zwei User-eigene, zwischenzeitlich (außerhalb dieser
+    Session/dieses Chats) vorgenommene Änderungen auf, die NICHT von Claude Code stammen und
+    unangetastet gelassen wurden: target_base_height 0.12->0.11 und movement_speed_x
+    0.075->0.15 (beide in PhantomxThesisEnvCfg-Basisklasse sowie der Kommentar-Rest in
+    PhantomxThesisSACEnvCfg entsprechend). git diff bestätigt: nur phantomx_thesis_env_cfg.py
+    betroffen, phantomx_thesis_env.py unverändert (lin_vel_estimation_mode wird zur Laufzeit aus
+    der Cfg gelesen, kein Codepfad musste angepasst werden). py_compile fehlerfrei.
 
 ================================================================================

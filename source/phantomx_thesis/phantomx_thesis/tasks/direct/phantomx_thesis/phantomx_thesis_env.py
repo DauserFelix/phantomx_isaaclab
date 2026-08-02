@@ -129,8 +129,6 @@ class PhantomxThesisEnv(DirectRLEnv):
                 "track_ang_vel_z_exp",
                 "lin_vel_z_l2",
                 "ang_vel_xy_l2",
-                "dof_torques_l2",
-                "dof_acc_l2",
                 "action_rate_l2",
                 "flat_orientation_l2",
                 "alive",
@@ -354,19 +352,6 @@ class PhantomxThesisEnv(DirectRLEnv):
             dim=1
         )
 
-        # joint torques penalty
-        joint_torques = torch.sum(torch.square(self._robot.data.applied_torque), dim=1)
-
-        # joint acceleration penalty — bestraft ruckartige/hektische Bewegung. Vor der Skalierung
-        # auf joint_accel_clamp gedeckelt: normale Bewegungsdynamik bleibt unclamped (voller
-        # Gradient), aber ein einzelner Physik-Instabilitäts-Spike kann den Batch nicht mehr
-        # vergiften wie vor dem Q-Divergenz-Fix (siehe clamp_reward — gleiches Prinzip, hier
-        # auf den Einzelterm statt auf die Summe angewendet).
-        joint_accel = torch.clamp(
-            torch.sum(torch.square(self._robot.data.joint_acc), dim=1),
-            max=self.cfg.joint_accel_clamp,
-        )
-
         # action rate penalty
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
 
@@ -392,9 +377,24 @@ class PhantomxThesisEnv(DirectRLEnv):
         alive_reward = torch.ones_like(lin_vel_error)
 
         # Movement penalty: penalizes not moving forward (unconditional — wie Working-Model 21.04.)
-        # sowie (PPO) proportional zu schnelles Laufen — siehe _compute_movement_penalty.
+        # sowie (PPO, ab Phase 3) proportional zu schnelles Laufen — siehe _compute_movement_penalty.
+        # Phasenabhängig (Grenzen identisch zu _apply_velocity_curriculum):
+        #   Phase 1 (<75k, Stillstand):        komplett inaktiv (0.0) — kein Zielkommando vorhanden,
+        #                                       gegen das getrackt werden könnte.
+        #   Phase 2 (75k-300k, halbe Speed):    NUR nach unten (Deficit-Clamp, kein Overshoot-Penalty)
+        #                                       — der Roboter darf hier schneller als das
+        #                                       Zwischenziel laufen, ohne bestraft zu werden; nur
+        #                                       Zu-langsam-Sein kostet Reward.
+        #   Phase 3 (>=300k, volle Speed):      volle, symmetrische _compute_movement_penalty (wie
+        #                                       bisher) — jetzt muss auch Überschreiten vermieden
+        #                                       werden.
         forward_speed = self._robot.data.root_lin_vel_b[:, 0]
-        movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
+        if self.common_step_counter < 75_000:
+            movement_penalty = torch.zeros_like(forward_speed)
+        elif self.common_step_counter < 300_000:
+            movement_penalty = torch.clamp(self._commands[:, 0] - forward_speed, min=0.0)
+        else:
+            movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
 
         # Raw speed accumulation for the true average-forward-speed metric (nicht Teil des
         # Rewards) — nur die x-Komponente (Vorwärtsrichtung), konsistent mit movement_penalty/
@@ -437,8 +437,6 @@ class PhantomxThesisEnv(DirectRLEnv):
             "track_ang_vel_z_exp":  yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale       * self.step_dt,
             "lin_vel_z_l2":         z_vel_error            * self.cfg.z_vel_reward_scale          * self.step_dt,
             "ang_vel_xy_l2":        ang_vel_error          * self.cfg.ang_vel_reward_scale        * self.step_dt,
-            "dof_torques_l2":       joint_torques          * self.cfg.joint_torque_reward_scale   * self.step_dt,
-            "dof_acc_l2":           joint_accel            * self.cfg.joint_accel_reward_scale    * self.step_dt,
             "action_rate_l2":       action_rate            * self.cfg.action_rate_reward_scale    * self.step_dt,
             "flat_orientation_l2":  flat_orientation       * self.cfg.flat_orientation_reward_scale * self.step_dt,
             "alive":                alive_reward           * self.cfg.alive_reward_scale          * self.step_dt,
@@ -453,16 +451,6 @@ class PhantomxThesisEnv(DirectRLEnv):
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Clamp the total reward against rare physics-instability outliers (e.g. a single-step
-        # solver blow-up driving joint_acc/applied_torque to extreme, likely non-physical
-        # values — dof_acc_l2/dof_torques_l2 are unclamped squared terms, so one such step can
-        # dominate an entire off-policy replay batch). Deliberately clamps only the *summed*
-        # scalar, not the individual `rewards` dict entries below, so Episode_Reward/* logging
-        # stays unclamped and can still pinpoint which term actually spiked. SAC-only (see
-        # PhantomxThesisSACEnvCfg.clamp_reward) — PPO's reward path is unchanged by default.
-        if self.cfg.clamp_reward:
-            reward = torch.clamp(reward, -self.cfg.reward_clamp_value, self.cfg.reward_clamp_value)
-
         for key, value in rewards.items():
             self._episode_sums[key] += value
 
@@ -470,19 +458,16 @@ class PhantomxThesisEnv(DirectRLEnv):
 
     def _compute_movement_penalty(self, forward_speed: torch.Tensor, command_speed: torch.Tensor) -> torch.Tensor:
         if not self.cfg.continuous_movement_penalty:
-            # Binary: wer nicht schneller als das aktuell aktive Curriculum-Kommando läuft,
-            # bekommt volle Strafe (vorher fix gegen cfg.movement_speed_x geprüft — das ist
-            # der Max-Wert der letzten Curriculum-Stufe, in früheren Stufen mit kleinerem
-            # Kommando also unerreichbar und damit fast permanent aktiv).
-            is_moving_forward = forward_speed > command_speed
-            deficit_penalty = (~is_moving_forward).float()
-
-            # Overshoot: proportionale Zusatzstrafe für zu schnelles Laufen, über denselben
-            # movement_penalty_scale skaliert (kein eigener Scale-Wert — track_lin_vel_xy_exp
-            # allein reagiert bei PPOs breitem lin_vel_kernel_width=0.25 zu schwach auf
-            # Überschreiten, SAC braucht das nicht, siehe engerer Kernel dort).
-            overshoot_penalty = torch.clamp(forward_speed - command_speed, min=0.0)
-            return deficit_penalty + overshoot_penalty
+            # Symmetrisch-proportionales |v_actual - cmd| statt binärem Deficit (hart, 0/1) +
+            # linearem Overshoot (schwach) — der alte Split war für ein FESTES cfg.movement_speed_x
+            # kalibriert (deficit_penalty=1.0 bestrafte jedes Unterschreiten des Curriculum-Maximums
+            # gleich stark, unabhängig vom Abstand; overshoot_penalty wuchs dagegen nur linear und
+            # war bei kleinen cmd-Werten kaum spürbar, siehe Kernel-Analyse). Sobald command_speed
+            # nicht mehr konstant ist (Ranged-Command-Sampling), verstärkt diese Asymmetrie sich zu
+            # einem reinen "immer maximal schnell laufen"-Anreiz statt echtem Tracking — analog zum
+            # bereits in Log 07-14 §3 für dieselbe Formel gefundenen und behobenen Overshoot-Bias.
+            # torch.abs() macht command_speed selbst zum eindeutigen, symmetrischen Minimum.
+            return torch.abs(forward_speed - command_speed)
 
         # Continuous: proportionales Defizit zwischen Kommando und Ist-Geschwindigkeit, nur wenn
         # überhaupt ein nennenswertes Vorwärtskommando anliegt (Schwelle relativ zu movement_speed_x,
@@ -612,50 +597,27 @@ class PhantomxThesisEnv(DirectRLEnv):
         """Setzt self._commands[env_ids] gemäß Trainings-Curriculum.
 
         movement_speed_x/yaw_rotation_speed_x aus der Cfg sind die einzige Quelle der
-        Wahrheit für die Ziel-Geschwindigkeiten. Zwei Rampenformen je nach
-        cfg.use_sac_curriculum — Default (False) reproduziert exakt das aktuelle
-        PPO-Verhalten (100k/350k-Stufen).
+        Wahrheit für die Ziel-Geschwindigkeiten. Einheitliches 3-Stufen-Curriculum für PPO
+        UND SAC (kein algorithmus-spezifischer Pfad mehr): bis 75k Steps steht der Roboter
+        (Command=0), von 75k bis 300k halbe Zielgeschwindigkeit (sanfterer Übergang aus dem
+        Stillstand als ein direkter Sprung auf volle Speed), ab 300k volle Zielgeschwindigkeit
+        inkl. randomisiertem Yaw.
         """
         steps = self.common_step_counter
         max_speed = self.cfg.movement_speed_x
         max_yaw = self.cfg.yaw_rotation_speed_x
 
-        if not self.cfg.use_sac_curriculum:
-            if steps < 100_000:
-                self._commands[env_ids] = 0.0
-            elif steps < 350_000:
-                self._commands[env_ids] = 0.0
-                self._commands[env_ids, 0] = max_speed / 2.0
-            else:
-                self._commands[env_ids] = 0.0
-                self._commands[env_ids, 0] = max_speed
-                self._commands[env_ids, 2] = torch.zeros_like(
-                    self._commands[env_ids, 2]
-                ).uniform_(-max_yaw, max_yaw)
-            return
-
-        # SAC-Variante: Zwei-Phasen-Curriculum "hoch → niedrig", invertiert ggü. PPO. Grund:
-        # bei sehr niedrigen Zielgeschwindigkeiten (movement_speed_x=0.05 für SAC) ist der
-        # exp(-error/kernel_width)-Tracking-Reward für Stillstand fast so hoch wie für echtes
-        # Laufen (z.B. exp(-0.03²/0.1) ≈ 0.991 bei Kommando 0.03 m/s) — kaum Lernanreiz,
-        # überhaupt loszulaufen. BOOTSTRAP_SPEED liegt deutlich über dem eigentlichen Ziel,
-        # damit der Reward-Unterschied zwischen Stehen und Laufen groß genug ist, um ein
-        # echtes Gangmuster zu erzwingen; Phase 2 transferiert dieses Gangmuster dann auf die
-        # tatsächliche Zielgeschwindigkeit herunter, statt sie von Null unter schwachem
-        # Gradienten zu lernen.
-        BOOTSTRAP_SPEED = 0.15   # m/s — unverifiziert, ob physisch komfortabel erreichbar
-                                # (Aktuator velocity_limit=0.8 rad/s in phantomx.py); in
-                                # TensorBoard (track_lin_vel_xy_exp, Episodenlänge) beobachten
-        if steps < 200_000:
+        if steps < 75_000:
             self._commands[env_ids] = 0.0
-            self._commands[env_ids, 0] = BOOTSTRAP_SPEED
+        elif steps < 300_000:
+            self._commands[env_ids] = 0.0
+            self._commands[env_ids, 0] = max_speed / 2.0
         else:
             self._commands[env_ids] = 0.0
             self._commands[env_ids, 0] = max_speed
-            if max_yaw > 0:
-                self._commands[env_ids, 2] = torch.zeros_like(
-                    self._commands[env_ids, 2]
-                ).uniform_(-max_yaw, max_yaw)
+            self._commands[env_ids, 2] = torch.zeros_like(
+                self._commands[env_ids, 2]
+            ).uniform_(-max_yaw, max_yaw)
 
     def _apply_terrain_curriculum(self, env_ids: torch.Tensor):
         """Stuft Envs anhand der in der gerade beendeten Episode zurückgelegten Distanz auf

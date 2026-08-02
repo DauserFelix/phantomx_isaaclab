@@ -1,0 +1,493 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-07-28
+Projekt: phantomx_thesis (Isaac Lab + SKRL) + ros2_ws (ROS2/Gazebo/Real-Data-Deployment)
+Fortsetzung von logs/2026-07-24_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. VORGESCHICHTE: LOG-VERZEICHNIS STUDIERT (logs/, 2026-07-01 bis 2026-07-24 + agent_evaluation_report.txt)
+--------------------------------------------------------------------------------
+
+Auf Anfrage alle vorhandenen Session-Historien (10 Dateien, ca. 4200 Zeilen) sowie
+agent_evaluation_report.txt (1677 Zeilen) per Explore-Agent vollständig gelesen und
+zusammengefasst. Kernaussage des Berichts: PPO-Standardabweichungs-Explosion zieht sich als
+roter Faden durch das gesamte Projekt und war bis 2026-07-24 nicht gelöst; SAC gilt als der
+verlässlichere Algorithmus (bester SAC-Run 7.5/10, bester PPO-Run 7.0/10 in der
+Heuristik-Bewertung). Details siehe die Einzeldateien selbst — hier nicht redundant
+wiederholt.
+
+
+--------------------------------------------------------------------------------
+2. ANALYSE Lauf 2026-07-27_15-11-56_ppo_torch (scripts/skrl/logs/skrl/phantomx_ppo/...)
+--------------------------------------------------------------------------------
+
+User bat um Einschätzung, ob dieses Training gelungen ist. Kein Python/Node im Sandbox-
+Environment verfügbar — TensorBoard-Events wurden über ein selbstgeschriebenes Perl-Skript
+(TFRecord/Protobuf-Parser, Summary.Value: tag=field1 string, simple_value=field2 float32/
+wiretype5 — NICHT field3, wie ein erster Parser-Versuch fälschlich annahm und der zu 0
+gefundenen Records führte) sowie std_debug.txt/joint_states.txt direkt ausgewertet.
+
+Befund: klarer 3-Phasen-Verlauf.
+  (1) Steps 0-300k: Reward-Mean steigt von 16 auf ~260, Policy lernt Grundgangmuster.
+  (2) Steps 300k-540k: Reward-Mean stabil bei 900-1130, mittlere Episodenlänge 2700-3100 von
+      3999 möglichen Steps — Roboter läuft über weite Teile der Episode erfolgreich. ABER
+      Policy/Standard deviation wächst bereits seit Step ~150000 monoton (0.137 -> 1.32 am
+      Ende, fast 10x), entropy_loss kippt von +0.05 auf -0.11 ins Negative (Vorzeichenwechsel
+      bei sigma≈0.242, mathematisch exakt = Nullstelle der Gaussian-Differentialentropie
+      1/sqrt(2*pi*e), kein Artefakt).
+  (3) ab Step ~546k: Kollaps — Reward-Mean bricht ein (927->333 bei 582k), mittlere
+      Episodenlänge stürzt von ~2700 auf 814 (Tiefpunkt bei 582k), leichte Teilerholung zum
+      Ende (653/1554) aber weit unter Vorkollaps-Niveau.
+
+Ursache identisch zum in frueheren Sessions (2026-07-09/14/22/24) bereits dokumentierten PPO-
+sigma-Explosionsmuster: clip_actions=false (params/agent.yaml bestätigt), skrl berechnet
+Entropie auf ungeclippter Normalverteilung obwohl Env hart clippt; die bereits reduzierte
+entropy_loss_scale=0.005 (statt 0.01) hat den Kollaps verzoegert, aber nicht verhindert.
+max_log_std=2.0 (sigma_max=exp(2.0)=7.39) als harter Deckel bestätigt in params/agent.yaml.
+
+FAZIT an User: Training NICHT sauber konvergiert. Endstand (agent_600000.pt) für Deployment
+ungeeignet. Empfehlung: best_agent.pt bzw. Checkpoint um Step ~450-480k (Reward-Peak, lange
+Episoden, sauberer Gang) statt Endstand verwenden. Strukturelle Lösung weiterhin offen
+(state-abhängiges log_std, tanh-Squashing wie bei SAC, oder härteres sigma-Limit).
+
+
+--------------------------------------------------------------------------------
+3. compare_observations.py — VERALTET-CHECK UND ACTION_SCALE-FIX
+--------------------------------------------------------------------------------
+
+User öffnete ros2_ws/src/phantomx_package/src/compare_observations.py (offline 1:1-Vergleich:
+speist rohe Ground-Truth-Robot-States aus einem Isaac-Lab-Trace [play.py --record_trace] durch
+die ECHTEN Methoden aus phantomx_policy_simulation_interface.py auf einem SimpleNamespace-
+Stand-in, ohne echten ROS2-Node). Frage: noch aktuell?
+
+Befund: Observation-Reihenfolge/Konkatenation, actions-Tail-Semantik (env._actions wird in
+_pre_physics_step() VOR _get_observations() im selben env.step() überschrieben, bestätigt in
+phantomx_thesis_env.py:203-212) und strict_action_pipeline=True für PPO+SAC (env_cfg.py:266)
+weiterhin korrekt/konsistent. ABER: Interface hatte ACTION_SCALE=0.75 hartcodiert
+(phantomx_policy_simulation_interface.py:65), während die aktuelle Cfg (env_cfg.py:139) UND
+der 27.07-Trainingslauf (params/env.yaml:418) bereits action_scale=0.5 verwenden — ein
+zurückgebliebener Wert von einer früheren Skalenänderung. GEFIXT: ACTION_SCALE auf 0.5
+korrigiert. POLICY_PATHS (verweist nur auf alte Checkpoints vom 12./15. Juli) bewusst NICHT
+angefasst, da unklar ob/wohin ein neuer Export erfolgen soll.
+
+
+--------------------------------------------------------------------------------
+4. NameError beim play.py-Start: 'Tracking' is not defined
+--------------------------------------------------------------------------------
+
+User-Traceback beim Import von PhantomxThesisSACEnvCfg. Ursache: reiner Tippfehler in
+phantomx_thesis_env_cfg.py:259-260 — ein mehrzeiliger Kommentar zu lin_vel_kernel_width hat
+beim Zeilenumbruch das führende '#' auf der zweiten Zeile verloren ("Tracking-Kernels
+(lin_vel)" wurde dadurch als Python-Ausdruck geparst). Auf expliziten Wunsch NICHT behoben
+("Mach keine Änderung, sag mir nur was das ist") — nur erklärt, nicht gefixt.
+
+
+--------------------------------------------------------------------------------
+5. .npz-TRACE-FORMAT ERKLÄRT
+--------------------------------------------------------------------------------
+
+User hatte selbst bereits einen Trace aufgezeichnet (versteckte Datei ".npz" direkt in
+ros2_ws/src/phantomx_package/src/ — Hinweis gegeben, das eher in ein Scratch-/Log-Verzeichnis
+zu verschieben statt im Package-Quellordner). Struktur erklärt: 11 Arrays (step, joint_pos,
+joint_vel, root_ang_vel_b, root_quat_w, projected_gravity_b, root_lin_vel_b, commands,
+actions, obs_noisy, obs_clean), entspricht exakt play.py:381-419. Dieser konkrete Trace hatte
+1000 Steps (--record_length 1000, nicht Default 500).
+
+
+--------------------------------------------------------------------------------
+6. AttributeError beim ersten compare_observations.py-Lauf: '_angvel_buf' fehlt
+--------------------------------------------------------------------------------
+
+Zwischen den Sessions wurde phantomx_policy_simulation_interface.py (außerhalb dieser
+Session, vermutlich vom User oder dem separaten ROS2-Docker-Agenten) erheblich erweitert:
+neuer Meanspeed-Publisher (/phantomx/meanspeed), EMA-Action-Smoothing (_effective_actions()
+gibt jetzt (clipped, smoothed)-Tupel zurück statt einem Array), Rate-Limiting
+(_prev_sent_q_target, max_action_delta), geänderte DEFAULT_JOINT_POS_RAD (Thigh 0.5->-1.2,
+Tibia 0.5->-1.0). compare_observations.py's minimaler SimpleNamespace-Stand-in kannte die
+neuen internen Attribute (_angvel_buf, _vel_buf, _height, pose.pose.position.z im
+Odometry-Stand-in) nicht mehr -> AttributeError. GEFIXT: fake-Objekt um
+_angvel_buf/_vel_buf (deque, maxlen=50) und _height=0.0 ergänzt, msg_odom um
+pose.pose.position.z ergänzt (compare_observations.py).
+
+
+--------------------------------------------------------------------------------
+7. actions-Segment FAIL (Delta 16.5) — Clipping-Mismatch gefixt
+--------------------------------------------------------------------------------
+
+Nach Fix aus Punkt 6: alle Segmente OK außer actions (max Delta 16.5). Ursache: play.py
+zeichnet die ROHE, ungeclippte Policy-Ausgabe auf (vor torch.clamp(-1,1) in
+_pre_physics_step()), während control_loop() im echten Interface last_actions aus der
+GECLIPPTEN Aktion setzt (self.last_actions = clipped_actions aus _effective_actions()).
+GEFIXT: fake.last_actions = np.clip(step["actions"], -1.0, 1.0) in compare_observations.py.
+Nach Fix: nur noch ein Restfehler von exakt 1.0 bei einem einzelnen Step (637 bzw. 457 in
+verschiedenen Traces) — als Episode-Reset-Artefakt identifiziert (env._actions wird bei
+Isaac-Lab-Reset auf 0 gesetzt, joint_pos zeigt an derselben Stelle einen Sprung; play.py's
+Recorder bildet das nicht sauber ab). Kein echter Bug, 999/1000 Steps exakt 0.000000.
+
+FAZIT für den User: ROS2-Observation-Berechnung ist bit-genau konsistent zu Isaac Lab
+(Sensor->Observation-Richtung). Nicht getestet: Policy->Motor-Richtung (Action-Scale,
+Clipping, EMA-Smoothing) — dafür separates Tooling nötig (siehe unten).
+
+
+--------------------------------------------------------------------------------
+8. NEUES TOOL: compare_gz2_observations.py + Logging-Erweiterung in beiden Interfaces
+--------------------------------------------------------------------------------
+
+User wollte einen echten Isaac-Lab-vs-GZ2-Vergleich (nicht nur Offline-Replay). Per
+AskUserQuestion geklärt: GZ2 läuft auf separater Maschine (kein Zugriff von hier), Logging
+soll über einen SEPARATEN Logger erfolgen, aber da last_actions nicht passiv aus vorhandenen
+Topics rekonstruierbar ist (nur die finalen, EMA-geglätteten Motor-Commands werden published),
+entschied der User: phantomx_policy_simulation_interface.py selbst um ein opt-in
+Logging-Flag erweitern. Vergleichsmethode: STATISTISCH (Mittelwert/Std/Min/Max pro Segment),
+da zwei unabhängige, nicht Step-synchronisierte Sessions verglichen werden (kein 1:1-Diff
+sinnvoll möglich).
+
+Umsetzung in phantomx_policy_simulation_interface.py:
+  - Neue Parameter log_observations (Default False) und observation_log_path.
+  - control_loop() schreibt bei aktivem Flag die tatsächlich inferierte 66-dim obs mit
+    (kein Nachbau).
+  - save_observation_log() schreibt beim Shutdown (Ctrl+C, im finally-Block von main())
+    eine .npz mit step/obs — gleiches Format wie play.py --record_trace.
+  - observation_log_path wird mit os.path.abspath() aufgelöst und beim Start geloggt (relative
+    Pfade werden sonst relativ zum Prozess-cwd aufgelöst, nicht zum Package-Verzeichnis —
+    User wollte das nur sichtbarer machen, keine Pfadänderung).
+
+Aktivierung: ros2 run phantomx_package phantomx_policy_simulation_interface --ros-args
+  -p log_observations:=true -p observation_log_path:=gz2_trace.npz
+
+Neues Skript compare_gz2_observations.py: lädt Isaac-Lab-Trace (obs_clean) und GZ2-Log (obs),
+vergleicht pro Segment (lin_vel_b, ang_vel_b, gravity_b, commands, joint_pos_rel, joint_vel,
+actions) Mittelwert/Std/Min/Max/|mean| beider Seiten plus deren Verhältnis, markiert Segmente
+über --warn-ratio (Default Faktor 2.0) als auffällig. Später um --per-axis erweitert: x/y/z
+einzeln für die drei 3-dim Segmente, um Achsvertauschung/Frame-Fehler (eine Achse auffällig)
+von einem globalen Skalierungs-/Timing-Effekt (alle Achsen gleichmäßig) zu unterscheiden.
+
+
+--------------------------------------------------------------------------------
+9. NEUE DATEI: phantomx_policy_real_data_interface.py (echte Hardware, kein Odometry)
+--------------------------------------------------------------------------------
+
+User postete den vollständigen Inhalt einer dritten Interface-Variante für echte Hardware
+(subscribt /phantomx/joint_states + /phantomx/imu_data, KEIN /odom — lin_vel_b wird per
+IMU-Beschleunigungsintegration berechnet: lin_vel_b = 0.99*lin_vel_b + a_body*dt, mit
+a_body = a_imu + gravity_b*9.81 zur Schwerkraftkompensation). Datei existierte noch nicht auf
+der Platte, wurde neu angelegt unter ros2_ws/src/phantomx_package/src/
+phantomx_policy_real_data_interface.py. Auf Wunsch dieselben Logging-Ergänzungen wie in
+phantomx_policy_simulation_interface.py übertragen (log_observations/observation_log_path-
+Parameter, Mitschreiben in control_loop(), save_observation_log() + Aufruf im main()-
+finally-Block), Kernlogik unverändert gelassen. Default observation_log_path:
+real_observation_log.npz.
+
+
+--------------------------------------------------------------------------------
+10. DREI COMPARE-LÄUFE AUSGEWERTET: Isaac Lab vs. GZ2 (2x) und vs. Real-Data
+--------------------------------------------------------------------------------
+
+GZ2-Lauf 1 (früh, vor joint_vel-Fund): ang_vel_b auffällig (Faktor 2.80), joint_vel im
+Normalbereich.
+
+GZ2-Lauf 2 / Real-Data-Lauf 1 (npz-Datei ".npz", 1000 Steps): joint_vel EXAKT NULL über die
+gesamte Aufzeichnung (mean=std=min=max=0.0) — kein Rauschmuster, sondern fehlender Messwert.
+Ursache identifiziert: joint_sensor_callback() setzt joint_vel_rad[i] nur bei
+"if msg.velocity:" — reale Hardware/Broadcaster lieferte in diesem Lauf offenbar kein
+velocity-Feld im /joint_states-Topic, wodurch joint_vel_rad auf dem Init-Wert (Zeros) blieb.
+User-Rückfrage nicht beantwortet ob Broadcaster-Limitation oder Konfigurationsfehler — offen.
+
+Real-Data-Lauf 2 (real_trance_2.npz, 1977 Steps, nach vermutlicher Korrektur): joint_vel jetzt
+plausibel (Faktor 0.54, nicht mehr auffällig). ang_vel_b weiterhin auffällig (Faktor 2.89,
+NICHT durch Rate-Limiting allein erklärbar da alle drei Achsen gleichmässig 2.73-2.94 betroffen
+-> --per-axis-Auswertung zeigt: globaler Timing-/Skalierungseffekt, NICHT Achsvertauschung).
+gravity_b in diesem Lauf: Achse y auffällig (Faktor 4.79, x 3.83, z~1.00) mit verschobenem
+MITTELWERT (nicht nur höherer Streuung wie bei ang_vel_b) -> deutet auf echte systematische
+Neigungsabweichung/möglichen IMU-Montage-Offset hin, nicht auf Rauschen. lin_vel_b uneinheitlich
+(nur y auffällig) — methodisch schwächer belastbar, da lin_vel_b im Real-Data-Interface über
+driftanfällige IMU-Integration berechnet wird, nicht direkt mit Isaac Labs Ground-Truth
+vergleichbar.
+
+GZ2-Lauf 3 (gz2_trace.npz, 8556 Steps, mit --per-axis und CSV-Export): ang_vel_b noch stärker
+auffällig (Faktor 4.71, Achsen 6.28/4.65/3.82 — weniger gleichmässig als beim Real-Data-Lauf,
+alle drei aber deutlich über Schwelle). gravity_b hier Achse x auffällig (Faktor 2.46/2.03),
+NICHT y wie beim Real-Data-Lauf — unterschiedliches Achsmuster zwischen den beiden
+Deployment-Pfaden spricht gegen eine rein gemeinsame gravity_b-Ursache. joint_vel hier
+auffällig (Faktor 2.08, GZ2-Std höher), anders als im letzten Real-Data-Lauf (dort
+unauffällig) — deutet auf ein GZ2/Gazebo-spezifisches zusätzliches Rauschen hin (z.B.
+Physik-Solver/Update-Rate), das auf echter Hardware in diesem Umfang nicht auftrat.
+
+USER-HYPOTHESEN ZU ang_vel_b GEPRÜFT (drei Hypothesen: Skalierungsfaktor, Timing/Frequenz,
+Frame-Transformation):
+  - Hypothese "ang_vel_scale in Env-Cfg vergessen": WIDERLEGT. phantomx_thesis_env.py:289
+    zeigt ang_vel = root_ang_vel_b + randn*0.01 — kein Skalierungsfaktor im Code, projektweite
+    Suche nach ang_vel_scale/angular_velocity_scale ergebnislos.
+  - Hypothese "Frame-/Achsentransformation fehlt": strukturell unwahrscheinlich für ang_vel_b
+    (IMU misst Winkelgeschwindigkeit bereits im Body-/Sensor-Frame, keine Rotation nötig,
+    anders als bei gravity_b wo _quat_rotate_inv() explizit gebraucht wird). Per-Achse-Daten
+    bestätigen: bei ang_vel_b sind alle Achsen gleichmäßig betroffen (Real-Data-Lauf) bzw.
+    durchgängig stark betroffen (GZ2-Lauf) — kein Muster einer einzelnen falsch zugeordneten
+    Achse.
+  - Hypothese "Timing/Referenzfrequenz" (decimation=4 @ 200Hz Isaac Lab vs. 50Hz GZ2/Real):
+    bleibt der plausibelste verbleibende Erklärungsansatz für ang_vel_b, ggf. in Kombination
+    mit dem in einer früheren Antwort aufgeworfenen Verdacht zu max_action_delta =
+    joint_velocity_limit_rad_s/control_frequency (~0.016 rad/Step in
+    phantomx_policy_real_data_interface.py — deutlich enger als der Faktor-100-Wert im
+    Simulations-Interface, ungeklärt ob beabsichtigt oder fehlender Fix).
+
+GESAMTEINORDNUNG (an User kommuniziert): ang_vel_b ist der einzige Befund, der in ALLEN
+untersuchten Läufen (GZ2 UND Real-Data) konsistent auftritt, mit Mittelwert nahe 0 (reines
+Streuungsproblem, kein Drift) — spricht für eine gemeinsame Pipeline-Ursache
+(Timing/Rate-Limiting), nicht hardwarespezifisches IMU-Rauschen. gravity_b und joint_vel
+zeigen dagegen zwischen GZ2 und Real-Data UNTERSCHIEDLICHE Achsen/Auffälligkeiten — deutet auf
+zusätzliche, pfadspezifische Ursachen hin (z.B. IMU-Montage-Offset nur real, Gazebo-Physik-
+Rauschen nur simuliert), nicht auf eine einzelne gemeinsame Wurzelursache für alle Befunde.
+commands/joint_pos_rel/actions bleiben in allen Läufen unauffällig (Faktor 0.96-1.17) — Policy
+trifft in beiden Deployment-Pfaden ähnliche Entscheidungen wie im Training, spricht gegen eine
+grundsätzlich kaputte/kollabierte Policy als Ursache der Observation-Abweichungen.
+
+OFFEN am Ende der Session: ob joint_vel-Totalausfall (Punkt 10, GZ2-Lauf 2) ein grundsätzliches
+Hardware-/Broadcaster-Limit oder ein Konfigurationsfehler war — ungeklärt. Zeitlich aufgelöste
+Analyse von ang_vel_b (Schübe vs. durchgängig) anhand der neu vorhandenen CSV-Exporte
+(per_axis_2026-07-28_14-12-55.csv, raw_gz2_..., raw_isaaclab_...) als nächster Schritt
+vorgeschlagen, von User noch nicht in Auftrag gegeben.
+
+
+--------------------------------------------------------------------------------
+11. ZUSAMMENFASSENDE DOKU-PROMPTS ERSTELLT (nicht Teil des Repos, nur Scratchpad)
+--------------------------------------------------------------------------------
+
+Zwei zusammenfassende Markdown-Dokumente auf Anfrage geschrieben (liegen im Scratchpad, NICHT
+im Projekt-Repo):
+  - Referenz zu compare_observations.py und compare_gz2_observations.py (Vorgehensweise,
+    Ausführung, Interpretationstabelle für typische Ergebnisse).
+  - Analyse Isaac Lab vs. GZ2 vs. Real-Data basierend auf den drei Compare-Läufen aus Punkt 10.
+Bei Bedarf für die Thesis-Dokumentation aus dem Scratchpad zu übernehmen.
+
+
+--------------------------------------------------------------------------------
+12. DEFAULT JOINT STATES + PUBLISH-REIHENFOLGE AUF ANFRAGE ERNEUT AUSGEGEBEN
+--------------------------------------------------------------------------------
+
+Aus phantomx_policy_real_data_interface.py (zwischenzeitlich vom User erweitert, siehe
+Systemkontext dieser Session): DEFAULT_JOINT_POS_RAD aktuell Coxa=0.0, Thigh=-1.2, Tibia=-1.0
+(Policy-Reihenfolge) — geändert ggü. der im Code auskommentiert stehenden alten Version
+(0.0/0.5/0.5). MOTOR_ID_JOINT_NAMES (Controller-/IO-Reihenfolge, IDs 1-18) und
+POLICY_JOINT_NAMES (alphabetisch, Isaac-Lab-Reihenfolge) beide vollständig ausgegeben,
+Umrechnung erfolgt über POLICY_TO_MOTOR/MOTOR_TO_POLICY (Namens-Lookup).
+
+
+--------------------------------------------------------------------------------
+13. TRAINING 2026-07-27_15-11-56_ppo_torch (Folge-Analyse, siehe auch Punkt 2 oben):
+    action_scale=0.75 als veralteter Wert im Interface identifiziert
+--------------------------------------------------------------------------------
+
+Anmerkung: Punkt 3 (compare_observations.py-Fix) bereits in dieser Datei dokumentiert;
+zusätzlicher Kontext hier: export_policy.py (ros2_ws/src/phantomx_package/src/) exportiert
+SKRL-Checkpoints (best_agent.pt) zu eigenständigen TorchScript-Bundles
+(RunningStandardScaler + Actor fusioniert in einem forward()) — für ROS2-Deployment gedacht,
+NICHT kompatibel mit play.py (siehe Punkt 15 unten).
+
+
+--------------------------------------------------------------------------------
+14. play.py --checkpoint policy_ros2_ppo.pt STÜRZT AB — FALSCHE TESTMETHODIK, KEIN BUG
+--------------------------------------------------------------------------------
+
+User berichtete: best_agent.pt (Run 2026-07-28_13-17-46_ppo_torch) läuft in play.py perfekt,
+die daraus exportierte policy_ros2_ppo.pt (via export_policy.py) lässt den Roboter sofort
+kollabieren. Ausführliche Fehlersuche (in dieser Reihenfolge geprüft und jeweils verworfen):
+  - Scaler-Lade-Fehler in export_policy.py (RunningStandardScalerModule kopiert
+    running_mean/running_variance) — WIDERLEGT, Konsolen-Log bestätigte "[INFO] Observation
+    scaler loaded from checkpoint."
+  - best_agent.pt sei fälschlich der Endstand statt des historisch besten Checkpoints —
+    WIDERLEGT: unterschiedliche Hashes/Dateigrößen zu agent_600000.pt; skrl-Quellcode
+    (base.py:466-480, post_interaction()) bestätigt korrekte "reward > bisheriger Bestwert"-
+    Logik, checkpoint_best_modules wird nur bei echtem neuen Bestwert aktualisiert.
+  - clip_mean_actions/clip_actions als Erklärung für einen play.py-vs-Export-Unterschied —
+    WIDERLEGT: clip_actions:false in beiden Faellen identisch, kein Unterschied.
+  - Sanity-Check-Output-Range [-20, 27] bei Null-Input in export_policy.py als Hinweis auf
+    kaputte Policy — als nicht aussagekräftig eingeordnet (Null-Input ist unrealistisch, echte
+    gravity_b ist nie [0,0,0]).
+TATSÄCHLICHE URSACHE (User-Antwort auf Rückfrage, mit vollständigem play.py-Log bestätigt):
+  User hatte policy_ros2_ppo.pt (TorchScript-Bundle, nur für torch.jit.load() im ROS2-Interface
+  gedacht) direkt mit play.py getestet. torch.load() in play.py/skrl erkennt automatisch das
+  Zip/TorchScript-Format (Warning: "received a zip file that looks like a TorchScript archive,
+  dispatching to torch.jit.load") und versucht es als skrl-Agent-Checkpoint (dict mit "policy",
+  "state_preprocessor" etc.) zu laden — strukturell inkompatibel, Ergebnis ist ein kaputter
+  Mischzustand, kein Hinweis auf einen tatsächlichen Fehler in der exportierten Policy selbst.
+  KEINE Code-Änderung noetig/vorgenommen. Offen: ob policy_ros2_ppo.pt bei korrektem Test
+  (torch.jit.load() + echte Observationen statt Null-Input) tatsächlich funktioniert — von
+  User nicht in Auftrag gegeben, kein Testskript geschrieben.
+
+
+--------------------------------------------------------------------------------
+15. INFO-KATALOG FÜR EXTERNE STELLE ZUSAMMENGESTELLT (Cfg-Werte zu den 2026-07-28-Checkpoints)
+--------------------------------------------------------------------------------
+
+User bat um einen vollständigen Parameterkatalog (PD-Gains, Env-Cfg, Boden/Kontakt, Domain
+Randomization, Observation-Noise, Solver, Kontrollfrequenz) zum Abgleich mit einer externen
+Gegenstelle. Als zuverlässigste Quelle NICHT den aktuellen Cfg-Code-Stand genutzt, sondern die
+von train.py automatisch gespeicherten, zum Trainingszeitpunkt vollständig aufgelösten
+Snapshots params/env.yaml + params/agent.yaml der beiden konkreten Runs:
+  - PPO: phantomx_ppo/2026-07-28_13-17-46_ppo_torch (Quelle für
+    policy_ros2_ppo_2026_07_28_13_17_46_as_05.pt)
+  - SAC: phantomx_sac/2026-07-28_21-17-13_sac_torch (Quelle für
+    policy_ros2_sac_2026_07_28_17_13_AC_05.pt — NICHT 21-15-17, dieser Parallel-Run brach ohne
+    jeden Checkpoint ab, leeres checkpoints/-Verzeichnis bestätigt)
+Kernwerte: action_scale=0.5, joint_pos_limit=1.0 rad, decimation=4, sim.dt=0.005 (→ 50Hz
+effektive Policy-Frequenz), stiffness=10.0/damping=2.0/effort_limit=1.5 Nm/velocity_limit=0.8
+rad/s für alle drei Aktuator-Gruppen (Coxa/Femur/Tibia) identisch, target_base_height=0.11,
+movement_speed_x=0.15, episode_length_s=80.0, terrain_type=plane (kein Rough-Terrain für diese
+Runs), Domain Randomization NUR auf Bodenreibung (static 0.4-0.6, dynamic 0.35-0.5) und
+Rumpfmasse (±0.5kg addiert) — explizit KEINE PD-Gain-, Motor-Delay- oder Push-Force-
+Randomization vorhanden (EventCfg enthält nur physics_material + add_base_mass).
+KORREKTUR einer im User-Anfrage-Text enthaltenen Annahme: Clipping auf joint_pos_limit in
+_pre_physics_step() IST vorhanden und aktiv (torch.clamp bei strict_action_pipeline=True,
+phantomx_thesis_env.py:216-221) — entgegen der Annahme "im vorliegenden Snapshot fehlte das".
+Uncommittete Änderungen in phantomx_thesis_env_cfg.py (Git-Commit 1a2f6bc, 2026-07-27 11:28
+UTC, als Referenz-Stand identifiziert) geprüft und als bereits in den Runs wirksame, bekannte
+Änderungen bestätigt (episode_length_s, target_base_height, movement_speed_x,
+enable_action_latency/lin_vel_estimation_mode) — kein Widerspruch zu den params/env.yaml-
+Snapshots.
+
+
+--------------------------------------------------------------------------------
+16. KORREKTUR EINER FRÜHEREN ROBOT-CFG-AUSSAGE: isaaclab_assets/robots/phantomx.py EXISTIERT
+--------------------------------------------------------------------------------
+
+In Punkt 15 (Info-Katalog) faelschlich behauptet, es gaebe keine separate Robot-Cfg-Datei
+("isaaclab_assets/robots/phantomx.py") und PHANTOMX_CFG sei Teil von phantomx_thesis_env_cfg.py
+selbst. Bei einer spaeteren Anfrage zu Drehmoment/Masse widerlegt: phantomx_thesis_env_cfg.py
+importiert PHANTOMX_CFG tatsaechlich aus isaaclab_assets.robots.phantomx (Zeile 21), Datei liegt
+unter /workspace/isaaclab/source/isaaclab_assets/isaaclab_assets/robots/phantomx.py und enthaelt
+Docstring-Vergleich Hardware- vs. Sim-Aktuatorwerte:
+  Hardware (Dynamixel AX-12A laut URDF): effort=2.8 Nm, velocity=5.6549 rad/s (~54 RPM),
+    Joint-Range ±2.618 rad (±150°).
+  Simulation (ImplicitActuatorCfg, bewusst konservativer, Kommentar: "prevent sim instability"):
+    effort_limit=1.5 Nm, velocity_limit=0.8 rad/s, stiffness=10.0, damping=2.0 — identisch fuer
+    alle 3 Aktuator-Gruppen (Coxa/Femur/Tibia), keine Differenzierung nach Belastung.
+  soft_joint_pos_limit_factor=0.9 (90% der Hardware-Range).
+Hinweis an User: da simuliertes effort_limit (1.5 Nm) unter dem realen AX-12A-Maximum (2.8 Nm)
+liegt, lernt die Policy vermutlich nie, mehr als 1.5 Nm abzurufen — relevant fuer die geplante
+Tibia-Load-Schwellwert-Kalibrierung (Punkt 17), falls diese gegen das reale 2.8-Nm-Maximum statt
+gegen den in der Simulation tatsaechlich genutzten Bereich kalibriert werden sollte.
+Masse (bereits zuvor aus full_phantom_isaacsim.urdf berechnet, hier erneut bestaetigt): base_link
+0.001kg + MP_BODY 0.976kg + 24 Beinlinks x 0.024358kg = 1.561 kg Gesamtmasse (statisch), plus
+aktive add_base_mass-Randomisierung (±0.5kg) -> effektiv 1.061-2.061 kg pro Trainings-Episode.
+
+
+--------------------------------------------------------------------------------
+17. TIBIA-LOAD-SCHWELLWERT ALS FOOT-CONTACT-PROXY — ANALYSE (NICHT UMGESETZT)
+--------------------------------------------------------------------------------
+
+User-Idee: da AX-12A kein Drehmoment, nur Load auslesen kann, boolesche Variable einfuehren
+(Load > Schwellwert, z.B. 100g-Aequivalent) NUR fuer die 6 Tibia-Motoren (Mikrocontroller-
+Auslesezeit-Limit bei allen 18), um Bodenkontakt zu erkennen. Analyse (keine Code-Aenderung):
+  - Grundidee hardwaretechnisch plausibel (Load-Register als indirekter Kraft-Proxy, etabliertes
+    Prinzip bei Servos ohne echten Kraftsensor).
+  - ENTSCHEIDENDER BEFUND: foot_contact (_die_body_ids, net_forces_w > 1.0N) ist in
+    phantomx_thesis_env.py NUR Teil von _get_rewards(), NICHT Teil der 66-dim Observation in
+    _get_observations() (Zeilen 286-306 durchsucht, bestaetigt) — die trainierte Policy sieht
+    Bodenkontakt zur Inferenzzeit nie, nutzt es nur indirekt ueber gelernte Bewegungsmuster.
+  - Damit haengt der Nutzen komplett vom Einsatzzweck ab: als Diagnose/Monitoring-Signal (Gang-
+    Validierung gegen tripod_gait/foot_contact_reward) sinnvoll und ohne Retraining umsetzbar;
+    als tatsaechlicher Policy-Input würde es einen Observation-Space-Umbau (66->72 Dim) UND
+    einen Neu-Trainingslauf mit aequivalentem simuliertem Proxy-Signal erfordern (deutlich
+    groesserer Aufwand); als reine Sicherheits-/Nottrigger-Logik unabhaengig von der Policy
+    moeglich.
+  - Tibia-als-Proxy-Wahl bestaetigt konsistent mit dem Sim-Modell (_die_body_ids sind die
+    Tibia-Kontaktpunkte, dieselben die auch fuer foot_contact_reward/tripod_gait ausgewertet
+    werden).
+FAZIT an User: macht Sinn als Diagnose-Tool, aktuell OHNE Effekt auf Policy-Verhalten selbst.
+Rueckfrage nach dem eigentlichen Ziel (Diagnose/Sicherheit/Policy-Input) gestellt, vom User in
+dieser Session nicht mehr beantwortet.
+
+
+--------------------------------------------------------------------------------
+18. SINNVOLLE GZ2-TRACKING-PARAMETER — ANALYSE (NICHT UMGESETZT)
+--------------------------------------------------------------------------------
+
+Auf Anfrage priorisierte Liste zusaetzlicher GZ2-Trackingparameter erstellt, abgeleitet aus
+allen in phantomx_thesis_env.py vorhandenen Reward-Termen/Metrics (_get_rewards() Zeilen
+333-460, Metrics/avg_forward_speed_mps + avg_body_height_m). Hohe Prioritaet: episodenweiter
+avg_forward_speed_mps/avg_body_height_m (1:1-Analogon zu den Sim-Metrics, aktuell im Interface
+nur als 1s-Gleitmittel via /phantomx/meanspeed vorhanden, nicht episodenweit), foot_contact pro
+Bein + num_feet_in_contact + Tripod-Score (direkte Analoga zu foot_contact_reward/tripod_gait,
+bisher im Deployment gar nicht beobachtbar). Mittlere Prioritaet: Roh-Log (nicht nur Mittelwert)
+von ang_vel_b/roll-pitch-rate fuer zeitlich aufgeloeste Analyse des in Punkt 10 gefundenen
+Befunds, flat_orientation/gravity_b.xy als Analogon zu flat_orientation_l2, Action-Rate,
+Lazy-Legs-Zaehler. Niedrige Prioritaet: Motor-Temperatur/Spannung (kein Sim-Aequivalent),
+rohes Load-/Effort-Register zusaetzlich zum blossen Kontakt-Bool. Nicht umgesetzt, nur Analyse
+geliefert.
+
+
+--------------------------------------------------------------------------------
+19. AUTOMATISIERTES TUNING "GZ2-Policy-Output ≈ IsaacLab-Policy-Output" — ALS UNGEEIGNET
+    EINGESTUFT (NICHT UMGESETZT)
+--------------------------------------------------------------------------------
+
+User-Idee: Software die IsaacLab-Observations laedt, exportierte Policy anwendet, GZ2-Policy-
+Output ueberwacht, und Tuningparameter automatisch so anpasst dass beide Outputs moeglichst
+nahe beieinander liegen. Als GRUNDSAETZLICH FEHLERHAFTE ZIELFUNKTION eingestuft, nicht nur als
+Detail-Problem:
+  - IsaacLab und GZ2 sind zwei unabhaengige, NICHT step-synchronisierte Sessions (wie bereits in
+    compare_gz2_observations.py/Punkt 8 etabliert) — die Policy ist zwar deterministisch
+    (mean_actions, kein Sampling im Play-Modus), aber ihr Output haengt von der Observation ab,
+    die wiederum von der gesamten bisherigen Trajektorie abhaengt. Sobald sich GZ2 nur minimal
+    anders verhaelt (Reibung, PD-Dynamik, Timing — alles bereits als Befunde vorhanden),
+    divergiert die Trajektorie, und Policy-Output-Angleichung wuerde bedeuten: zwei bereits aus
+    unterschiedlichen Gruenden auseinanderlaufende Trajektorien kuenstlich zurueckzwingen ->
+    Risiko von Overfitting auf einen einzelnen aufgezeichneten Trace statt echter physikalischer
+    Kalibrierung.
+STATTDESSEN EMPFOHLEN (gleiche Infrastruktur, andere Zielfunktion): statistische Verteilung
+physikalischer Zustandsgroessen (wie compare_gz2_observations.py bereits berechnet: mean/std pro
+Segment) als Optimierungsziel nutzen, klassisches Parameter-Tuning/System-Identifikation gegen
+Gazebo-seitige Parameter (PD-Gains, Reibung, Timing) statt gegen Policy-Interpretation. Voraus-
+setzung: zuerst den commands-Hardcoding-Bug (Punkt 20) fixen, sonst Optimierung gegen
+systematisch falsches Signal. Konkretes Tuning-Skript von User nicht in Auftrag gegeben.
+
+
+--------------------------------------------------------------------------------
+20. WEITERER GZ2-VERGLEICHSLAUF: commands-Segment-Ausreisser aufgeklaert (Faktor 2.14)
+--------------------------------------------------------------------------------
+
+Neuer compare_gz2_observations.py --per-axis-Lauf (8556 bzw. neue Session, IsaacLab
+mean(commands)=0.0233 vs. GZ2 mean=0.0500). Herkunft von 0.0233 mathematisch hergeleitet:
+play.py ueberschreibt beim --record_trace-Aufruf self._commands HART auf [0.07, 0.0, 0.0]
+(play.py:378-380/440-442, Kommentar dort bestaetigt: "matching phantomx_policy_simulation_
+interface.py's hardcoded self.commands") — _segment_stats() mittelt ueber ALLE 3 Kanaele
+(vx+vy+yaw)/3 = 0.07/3 = 0.02333... = exakt der beobachtete Wert. GZ2-Seite: 0.05 = 0.15/3,
+d.h. der zum GZ2-Lauf gehoerige Interface-Stand hatte self.commands zu diesem Zeitpunkt
+offenbar auf [0.15, 0.0, 0.0] gesetzt (aktueller Code-Stand zeigt 0.075, siehe Punkt 3) — nicht
+mehr rekonstruierbar, WELCHE Interface-Version zum Zeitpunkt dieses konkreten GZ2-Laufs aktiv
+war. KORREKTUR einer eigenen fruehreren Fehldiagnose in dieser Session: die vorherige
+Behauptung, play.py wuerde movement_speed_x aus der aktuellen Cfg/dem Curriculum lesen, war
+falsch — play.py haerdcodiert den Trace-Kommandowert unabhaengig davon selbst. Restliche
+Segmente in diesem Lauf: ang_vel_b weiterhin auffaellig (Faktor 3.30, alle 3 Achsen betroffen,
+konsistent zu allen bisherigen Laeufen), gravity_b/lin_vel_b mit wechselnder dominanter Achse
+(x mal, y mal auffaellig, ueber verschiedene Laeufe hinweg nicht auf eine feste Achse
+festgelegt — spricht eher fuer Rauschen als fuer einen konstanten Achs-/Frame-Fehler),
+joint_pos_rel/joint_vel/actions weiterhin unauffaellig (Faktor 1.00-1.61).
+Offen am Sessionende: welcher Interface-Commit-Stand zum GZ2-Lauf mit commands=0.15 gehoerte;
+ob die self.commands-Hardcodierung im Interface auf 0.15 aktualisiert werden soll (User-
+Rueckfrage gestellt, in dieser Session nicht mehr beantwortet).
+
+
+--------------------------------------------------------------------------------
+21. ANALYSE: DREHMOMENT-STEUERUNG UND AX-12A-KOMPATIBILITAET
+--------------------------------------------------------------------------------
+
+User-Frage: ist im Action Space Drehmoment enthalten? AX-12A kann kein Drehmoment steuern,
+laeuft immer auf vollem Drehmoment — macht das Training mit Drehmoment ueberhaupt Sinn?
+Antwort anhand des Codes: Action Space ist NICHT Drehmoment, sondern Zielposition.
+_apply_action() ruft self._robot.set_joint_position_target(target) auf
+(phantomx_thesis_env.py:245) — kein set_joint_effort_target(). ImplicitActuator (Isaac-Lab-
+Dokumentation in actuator_pd.py:36-53 zitiert) ist ein in PhysX eingebauter PD-Positionsregler:
+Policy setzt nur das Ziel, PhysX berechnet intern das noetige Drehmoment (begrenzt durch
+effort_limit), analog zum AX-12A der ebenfalls nur eine Zielposition (Goal Position Register)
+erhaelt und intern mit voller verfuegbarer Kraft dorthin regelt. FAZIT: kein Widerspruch
+zwischen Trainingsmodell und AX-12A-Betriebsart — beide sind positionsgesteuert mit interner
+Kraftregelung, nicht drehmomentgesteuert von aussen. Als Restrisiko benannt: Isaac Labs
+kontinuierlicher PD-Regler (Kp=10, Kd=2) bildet die AX-12A-Firmware-PID/Trapezprofil-Dynamik
+nur naeherungsweise nach — moeglicher weiterer Beitrag zum bereits gefundenen ang_vel_b/
+joint_vel-Befund (Punkt 10/20), zusaetzlich zum Timing-/Rate-Limiting-Verdacht.
+
+================================================================================

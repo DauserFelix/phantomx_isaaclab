@@ -1,0 +1,320 @@
+================================================================================
+SESSION HISTORIE — PhantomX Hexapod RL (SKRL PPO + SAC)
+Datum: 2026-08-02
+Projekt: phantomx_thesis (Isaac Lab + SKRL)
+Fortsetzung von logs/2026-07-31_session_history.txt.
+================================================================================
+
+
+--------------------------------------------------------------------------------
+1. STUDIUM DER PROJEKTHISTORIE + ZUSAMMENFASSUNG MOVEMENT-PENALTY & PPO-KERNEL
+--------------------------------------------------------------------------------
+
+Auftrag: logs/-Verzeichnis studieren, dann speziell dokumentieren, welche Änderungen bisher an
+"movement penalty" und am PPO-Algorithmus-Kernel (Hyperparameter, Netzwerk) vorgenommen wurden.
+Per Subagent alle Session-Logs (01.07.-31.07.) plus agent_evaluation_report.txt durchsucht und
+gegen den damaligen Live-Code-Stand verifiziert. Ergebnis: Movement-Penalty-Formel-Evolution
+(binär -> kontinuierlich -> symmetrisch |v-cmd|) sowie die PPO-σ-Explosion als durchgängig
+ungelöstes Kernproblem dokumentiert. Keine Code-Änderung, reine Recherche.
+
+
+--------------------------------------------------------------------------------
+2. NETZWERKGRÖSSE PPO + SAC AUF [256,256,256] ERHÖHT
+--------------------------------------------------------------------------------
+
+User-Wunsch: Netzgröße bei PPO ([256,256,128]) und SAC ([128,128], 5 Netze: Policy+4 Critics)
+einheitlich auf [256,256,256] anheben.
+
+Geändert:
+  - skrl_ppo_cfg.yaml: policy.network und value.network layers [256,256,128] -> [256,256,256]
+  - skrl_sac_cfg.yaml: policy, critic_1, critic_2, target_critic_1, target_critic_2 layers
+    [128,128] -> [256,256,256] (alle 5 Netze), veralteten Vergleichskommentar aktualisiert
+
+WICHTIG (siehe Punkt 9/11): diese Änderung erwies sich im Nachhinein als der wahrscheinlichste
+Auslöser dafür, dass PPO ab diesem Zeitpunkt das Laufen nicht mehr zuverlässig lernte.
+
+
+--------------------------------------------------------------------------------
+3. ANALYSE: WAS BEWIRKT REWARD-CLAMPING BEI PPO? (nur Analyse, keine Umsetzung)
+--------------------------------------------------------------------------------
+
+Frage: sollte PPO wie SAC ein clamp_reward=True (±reward_clamp_value=20.0 auf den summierten
+Reward) bekommen? Analyse: SAC braucht das wegen off-policy Replay (Ausreißer-Samples werden
+über den Buffer wiederverwendet und können sich aufschaukeln, historisch Q1(min)=-101-Bug).
+PPO ist on-policy (Rollout wird nach 5 Epochen verworfen) und hat bereits mehrere andere
+Schutzmechanismen (RunningStandardScaler auf Value, ratio_clip, grad_norm_clip). Empfehlung:
+für PPO nicht sinnvoll, da Hauptrisiko (Advantage-Verzerrung bei geclampten Sturz-Strafen)
+den geringen Nutzen überwiegt. Keine Umsetzung zu diesem Zeitpunkt.
+
+
+--------------------------------------------------------------------------------
+4. joint_torque_reward_scale / joint_accel_reward_scale KOMPLETT ENTFERNT
+--------------------------------------------------------------------------------
+
+Beide Scales standen bereits auf 0.0 (faktisch deaktiviert seit früheren Sessions). Auf
+User-Wunsch komplett entfernt statt nur die Werte zu belassen:
+  - phantomx_thesis_env_cfg.py: joint_torque_reward_scale, joint_accel_reward_scale,
+    joint_accel_clamp (Feld) entfernt; verwaiste Kommentare aufgeräumt
+  - phantomx_thesis_env.py: joint_torques/joint_accel-Berechnung, "dof_torques_l2"/"dof_acc_l2"
+    Dict-Einträge und _episode_sums-Logging-Keys entfernt
+
+Anschließend clamp_reward/reward_clamp_value (der generische Summen-Clamp-Mechanismus, siehe
+Punkt 3) ebenfalls komplett entfernt (Basisklasse UND SAC-Override), da er nach Entfernung der
+beiden obigen Terme keinen mit Daten belegten Zweck mehr hatte — SAC's ursprünglicher
+Auslöser-Term für den Q-Divergenz-Bug existierte nicht mehr.
+
+
+--------------------------------------------------------------------------------
+5. VELOCITY-CURRICULUM MEHRFACH UMGEBAUT (PPO+SAC vereinheitlicht)
+--------------------------------------------------------------------------------
+
+Ausgangslage: PPO nutzte eine 3-Stufen-Rampe (0->100k: Stillstand, 100k->350k: halbe Speed,
+>350k: volle Speed+Yaw), SAC einen eigenen 2-Phasen-Bootstrap-Ansatz (BOOTSTRAP_SPEED=0.15 sofort
+ab Step 0, ab 200k zusätzlich Yaw) — beide gesteuert über das Flag use_sac_curriculum.
+
+Schritt 1: Auf User-Wunsch beide Algorithmen auf ein einheitliches 2-Stufen-Schema umgestellt:
+  <70k (später 75k): Stillstand. >=70k/75k: volle Zielgeschwindigkeit + Yaw sofort.
+  use_sac_curriculum-Flag komplett entfernt (Basis + SAC-Subklasse), _apply_velocity_curriculum()
+  läuft jetzt für beide durch denselben Code-Pfad.
+
+Schritt 2 (späterer User-Wunsch): 3-Stufen-Rampe für PPO UND SAC wieder eingeführt, mit neuen
+Zeitpunkten 75k/300k (statt der alten 100k/350k):
+  <75k: Stillstand. 75k-300k: halbe Zielgeschwindigkeit. >=300k: volle Zielgeschwindigkeit + Yaw.
+
+
+--------------------------------------------------------------------------------
+6. lin_vel_kernel_width MEHRFACH VERÄNDERT, AM ENDE ZURÜCK AUF 0.05
+--------------------------------------------------------------------------------
+
+Verlauf innerhalb der Session: 0.05 (Ausgangswert) -> 0.005 (wie SAC) -> 0.01 (Mittelweg) ->
+zurück auf 0.05.
+
+Grund für die Zwischenschritte: Diagnose, dass bei movement_speed_x=0.1 und breitem Kernel
+Stillstand fast maximalen Tracking-Reward bekam (exp(-0.01/0.05)≈82%), vermutet als Ursache für
+beobachtete niedrige mittlere Geschwindigkeiten (0.004-0.01 m/s) in mehreren Testläufen.
+
+KORREKTUR (siehe Punkt 9): Ein direkter Vergleich mit dem nachweislich erfolgreichen Referenzlauf
+2026-07-31_18-19-46_ppo_torch zeigte, dass genau dieser Lauf mit dem "verdächtigen" Wert 0.05
+erfolgreich war (0.0955 m/s bei 600k Steps) — die Verengung war also vermutlich nicht die
+Lösung. Zurückgesetzt auf 0.05 (PPO-Basisklasse). SAC bleibt unverändert bei 0.005 (eigener
+Subklassen-Override).
+
+
+--------------------------------------------------------------------------------
+7. height_reward_scale VON 5.0 AUF 2.5 GESENKT
+--------------------------------------------------------------------------------
+
+Rechnerische Analyse (mit realen Werten aus dem laufenden Training, Step-dt=0.02s) zeigte:
+movement_penalty war bei Fast-Stillstand zwar der stärkste Einzel-Strafterm (~-0.067/Step), aber
+height_tracking (+0.10/Step im Stand, da height_error≈0) und foot_contact_reward (+0.02/Step)
+lieferten zusammen mehr Netto-Reward fürs Stehen als movement_penalty kostete. Auf dieser Basis
+height_reward_scale halbiert (5.0->2.5), betrifft Basisklasse (PPO+SAC, kein eigener SAC-
+Override vorhanden).
+
+EINORDNUNG (siehe Punkt 9): Der erfolgreiche Referenzlauf 2026-07-31_18-19-46 hatte
+height_reward_scale=5.0, nicht 2.5 — die Senkung ging damit vermutlich in eine andere Richtung
+als ursprünglich vom Referenzlauf belegt. Nicht zurückgesetzt (nur der Kernel wurde
+zurückgedreht, height_reward_scale blieb bei 2.5 zum Ende der Session).
+
+
+--------------------------------------------------------------------------------
+8. movement_penalty PHASENABHÄNGIG GEMACHT (nur ab Curriculum-Phase 3 wirksam)
+--------------------------------------------------------------------------------
+
+Auf User-Wunsch: movement_penalty soll nicht während der gesamten Trainingszeit gleich wirken,
+sondern erst dann "hart" strafen, wenn der Roboter wirklich laufen soll.
+
+Finale Umsetzung in phantomx_thesis_env.py (_get_rewards, dieselben Phasengrenzen wie
+_apply_velocity_curriculum):
+  Phase 1 (<75k, Stillstand):        movement_penalty = 0.0 (komplett inaktiv)
+  Phase 2 (75k-300k, halbe Speed):   movement_penalty = clamp(command - forward_speed, min=0)
+                                      -> NUR Unterschreiten wird bestraft, kein Overshoot-Malus
+  Phase 3 (>=300k, volle Speed):     volle, symmetrische _compute_movement_penalty (wie zuvor)
+                                      -> jetzt bestraft auch Überschreiten der Zielgeschwindigkeit
+
+(Zwischenschritt vor dieser Fassung: komplett 0.0 in Phase 1+2, wurde auf expliziten
+Korrekturwunsch des Users noch am selben Tag zur obigen, differenzierteren Fassung verfeinert.)
+
+
+--------------------------------------------------------------------------------
+9. TIEFENANALYSE: VERGLEICH ERFOLGREICHER VS. FEHLGESCHLAGENER PPO-LÄUFE
+--------------------------------------------------------------------------------
+
+Auslöser: mehrere Testläufe nach den obigen Änderungen blieben bei sehr niedriger mittlerer
+Geschwindigkeit hängen (0.004 m/s bei 120k, 0.008 m/s bei ~300k, 0.01 m/s bei 342k — alle weit
+unter den jeweiligen Curriculum-Zielgeschwindigkeiten). User-Hypothese: könnte an der
+Netzwerkgrößen-Erhöhung (Punkt 2) liegen.
+
+Direkter Diff env.yaml + agent.yaml zwischen dem letzten bekannt guten Lauf
+(2026-07-31_18-19-46_ppo_torch, erreichte 0.0955 m/s bei 600k) und dem ersten Lauf danach
+(2026-08-01_13-07-49_ppo_torch, blieb bei ~0 m/s):
+  - env.yaml: KEINE einzige Wertänderung zwischen diesen beiden Läufen — nur 6 strukturell
+    entfernte, aber bereits wirkungslose Felder (clamp_reward, joint_accel_clamp,
+    joint_accel_reward_scale, joint_torque_reward_scale, reward_clamp_value,
+    use_sac_curriculum), siehe Punkt 4.
+  - agent.yaml: EINZIGER Unterschied ist die Netzwerkgröße: [256,256,128] (erfolgreich) vs.
+    [256,256,256] (nicht erfolgreich). Alle PPO-Hyperparameter (max_log_std=2.0,
+    entropy_loss_scale=0.005, kl_threshold=0.008, learning_rate=3e-4) identisch.
+
+=> Bestätigt: die Netzwerkgrößen-Erhöhung aus Punkt 2 ist der am direktesten belegte Auslöser
+   des Geh-Problems, nicht die später vorgenommenen Reward-Anpassungen (Punkt 6, 7).
+
+
+--------------------------------------------------------------------------------
+10. σ-EXPLOSION: MECHANISMUS-ANALYSE, FIX-VERSUCH, DANN WIDERLEGT UND ZURÜCKGESETZT
+--------------------------------------------------------------------------------
+
+Lauf 2026-08-02_01-33-41_ppo_torch (Netz [256,256,256], erfolgreich gelaufen: 0.093-0.11 m/s bei
+400k-600k) zeigte in std_debug.txt eine vollständige σ-Explosion: std_mean stieg von 0.135
+(Start) kontinuierlich bis 7.394 bei Step 600k — praktisch komplett an der harten Deckelung
+exp(max_log_std=2.0)=7.399 gesättigt. Auffällig: KLAdaptiveLR verstärkte die effektive Lernrate
+zwischen Step 108k und 288k von ~2.6e-5 auf ~2e-4 (fast 8x) statt zu bremsen, genau während σ
+von 0.22 auf 1.26 wuchs.
+
+Erster Fix-Versuch (auf User-Anweisung "analysiere und behebe das"): drei kombinierte
+Maßnahmen in skrl_ppo_cfg.yaml:
+  - max_log_std: 2.0 -> 0.5 (seit 2026-07-09 wiederholt empfohlen, nie umgesetzt)
+  - entropy_loss_scale: 0.005 -> 0.001
+  - kl_threshold: 0.008 -> 0.003
+
+WIDERLEGUNG: Systematischer Vergleich aller 13 PPO-Läufe mit >=500k Steps (Datum 2026-07-22 bis
+2026-08-02) zeigte: 11 von 13 Läufen erreichten bei Step 600k eine reale Geschwindigkeit
+zwischen 0.084 und 0.195 m/s — über eine riesige Bandbreite von σ-Endwerten (0.35 bis 6.37,
+d.h. auch bei starkem, nicht-explodiertem-aber-deutlich-erhöhtem σ lief das Training gut). Keine
+erkennbare Korrelation zwischen σ-Höhe und Erfolg. Nur 1 von 13 Läufen (2026-08-01_18-13-56,
+σ=7.40) war ein echter Fehlschlag, brach aber bereits nach 720 std_debug-Einträgen ab (vermutlich
+Absturz, kein reines σ-Phänomen). Der zweite Lauf mit σ=7.39 (2026-08-02_01-33-41) lief trotz
+Sättigung erfolgreich.
+
+=> max_log_std-Senkung auf 0.5 hätte die Exploration bei mehreren nachweislich erfolgreichen
+   Konfigurationen (σ bis 6.37) unterhalb ihres normalen Betriebsbereichs gedeckelt und wurde
+   daher wieder VERWORFEN. Alle drei Werte auf User-Anweisung zurückgesetzt:
+   max_log_std: 0.5 -> 2.0, entropy_loss_scale: 0.001 -> 0.005, kl_threshold: 0.003 -> 0.008
+   (= wieder exakt der Stand von vor diesem Fix-Versuch).
+
+LERNPUNKT: die reflexhafte "σ-Explosion = Ursache" These aus den früheren Sessions greift hier
+zu kurz — bezogen auf ISOLIERTE Einzelläufe unzureichend validiert. Erst der Vergleich über
+ALLE verfügbaren Vollständig-Läufe zeigte, dass hohes/explodierendes σ in diesem Setup meist
+mit Erfolg korrelierte, nicht mit Misserfolg. Die tatsächliche Unterscheidung zwischen Erfolg
+und Misserfolg lag in dieser Session an anderer Stelle (Netzwerkgröße, siehe Punkt 9).
+
+
+--------------------------------------------------------------------------------
+11. REFERENZLAUF-VERGLEICH: WAS BRACHTE PPO URSPRÜNGLICH ZUM LAUFEN? (2026-07-31, 11:50 vs 18:19)
+--------------------------------------------------------------------------------
+
+Diff env.yaml zwischen 2026-07-31_11-50-20_ppo_torch (nicht erfolgreich) und
+2026-07-31_18-19-46_ppo_torch (erfolgreich, 0.0955 m/s bei 600k) — agent.yaml identisch bis auf
+Seed:
+  - lin_vel_kernel_width: 0.25 -> 0.05
+  - movement_penalty_scale: 15.0 -> 35
+  - seed: 1 -> 2
+
+=> Die Kombination aus Kernel-Verengung (0.25->0.05) UND Movement-Penalty-Erhöhung (15->35)
+   brachte PPO damals von nicht-laufend zu erfolgreich laufend — beide Änderungen zusammen,
+   nicht isoliert. Bestätigt retrospektiv, dass Kernel=0.25 ("praktisch blind") tatsächlich ein
+   reales Problem war/ist, WENN movement_penalty_scale gleichzeitig niedrig bleibt.
+
+
+--------------------------------------------------------------------------------
+12. AUSWERTUNG: SAUBERSTER ERFOLGREICHER PPO-REFERENZLAUF OHNE σ-EXPLOSION
+    (2026-07-22_13-17-04_ppo_torch, σ_final=0.35, 0.100 m/s bei Step 600k)
+--------------------------------------------------------------------------------
+
+Config dieses Laufs (deutlich abweichend von der Session-Konfiguration Anfang August):
+  seed=42, Netzwerk [256,256,128], max_log_std=2.0, entropy_loss_scale=0.005, kl_threshold=0.008
+  (agent.yaml identisch zum "Standard" der Session)
+  lin_vel_kernel_width=0.25, movement_penalty_scale=15.0, movement_speed_x=0.075 (NICHT 0.1),
+  action_scale=0.75 (NICHT 0.5), height_reward_scale=5.0, action_rate_reward_scale=-0.02,
+  episode_length_s=40.0 (NICHT 80.0), joint_torque/accel_reward_scale=0.0,
+  use_sac_curriculum=false (alte 100k/350k-Rampe), swing_foot_height-Feature existierte damals
+  noch nicht.
+
+EINORDNUNG: Dieser Lauf widerspricht der Kernel=0.25-"praktisch blind"-These aus Punkt 6/11
+zumindest teilweise — mit movement_speed_x=0.075 (statt 0.1) und action_scale=0.75 (statt 0.5)
+lief PPO hier trotz breitem Kernel sauber, OHNE σ-Explosion. Deutet darauf hin, dass
+movement_speed_x, action_scale und episode_length_s bisher zu wenig beachtete, potenziell
+relevante Stellschrauben sind, die sich zwischen den frühen erfolgreichen Läufen und den
+Anfang-August-Läufen ebenfalls geändert haben — nicht abschließend untersucht, offener Punkt
+für zukünftige Sessions.
+
+
+--------------------------------------------------------------------------------
+13. GEHBEWEGUNGS-ERWARTUNGSWERTE UND ABBRUCHKRITERIUM FÜR DAS AKTUELLE 3-STUFEN-CURRICULUM
+--------------------------------------------------------------------------------
+
+Auf Nutzerfrage hergeleitet (Curriculum-Grenzen 75k/300k):
+  - Erste Bewegungsansätze erwartbar: ~100k-150k Steps (25k-75k nach Beginn Phase 2)
+  - Bis ~250k-300k Steps sollte die mittlere Geschwindigkeit klar über 0.02-0.03 m/s liegen
+    (40-60% der Phase-2-Zielgeschwindigkeit 0.05 m/s), sonst Abbruch-Kandidat
+  - Konkretes Abbruchkriterium: bei Step ~250k prüfen — falls avg_forward_speed_mps klar unter
+    0.015 m/s liegt UND kein steigender Trend über die letzten 50k-100k Steps erkennbar ist,
+    Lauf abbrechen statt bis 600k weiterlaufen zu lassen (Begründung: bisherige hängende Läufe
+    zeigten kein "startet spät, holt dann auf"-Muster).
+
+
+--------------------------------------------------------------------------------
+14. EPISODE-LÄNGEN-ANALYSE: MEAN 836 / MIN 7 / MAX 4000 BEI 192K SCHRITTEN
+--------------------------------------------------------------------------------
+
+Nutzer berichtete extrem geringe "Episode / Total timesteps (mean)" (836 von max. ~4000 bei
+episode_length_s=80.0). Mechanismus in _get_dones() analysiert: Episoden enden vorzeitig durch
+"died" (mp_body_height < termination_height=0.0 ODER >0.40, tilt>termination_tilt=0.03 [~18°],
+ODER non_foot_contact [Körper/Coxa/Femur berührt Boden — sofortige, toleranzlose Terminierung]),
+nicht nur durch Timeout. min=7 Steps zeigt: manche Envs sterben quasi sofort nach Reset.
+Eingeordnet als zusätzliches, eigenständiges Symptom (häufiges Stürzen verhindert das Sammeln
+längerer, kohärenter Bewegungserfahrung pro Episode) — mögliche Mitursache für die insgesamt
+fragile Lernkurve, aber nicht abschließend auf eine der vier Termination-Ursachen
+zurückgeführt (keine aufgeschlüsselten Termination-Metriken aus TensorBoard verfügbar
+gemacht). Offener Punkt für zukünftige Sessions.
+
+
+--------------------------------------------------------------------------------
+15. VORZEICHEN-AUDIT ALLER 13 REWARD-TERME
+--------------------------------------------------------------------------------
+
+Systematische Prüfung von phantomx_thesis_env.py (_get_rewards) gegen phantomx_thesis_env_cfg.py:
+jeder Term auf Rohgröße (Fehler/Bonus-Charakter) gegen sein konfiguriertes Vorzeichen geprüft.
+
+ERGEBNIS: Alle 13 Terme (track_lin_vel_xy_exp, track_ang_vel_z_exp, lin_vel_z_l2, ang_vel_xy_l2,
+action_rate_l2, flat_orientation_l2, alive, height_tracking, movement_penalty, foot_contact,
+tripod_gait, lazy_legs, swing_foot_height) wirken korrekt in die beabsichtigte Richtung
+(Bonus bei gutem Verhalten, Strafe bei schlechtem) — KEIN Vorzeichenfehler gefunden.
+
+Stilistischer (nicht funktionaler) Befund: movement_penalty und lazy_legs speichern ihre Scale
+positiv und negieren explizit im rewards-Dict ("-movement_penalty * scale"), während die
+übrigen echten Straf-Terme (z_vel_reward_scale=-5.0 etc.) den Scale selbst negativ speichern —
+bereits als bekannte, dokumentierte Stil-Inkonsistenz eingeordnet, kein Bug.
+
+NEBENFUND (nicht abschließend geklärt): action_rate_reward_scale stand beim Audit bei -0.02
+(Cfg-Default), obwohl in der Session zuvor von -0.05 (User-gesetzter Wert) die Rede war —
+möglicher weiterer Fall von undokumentierter Drift außerhalb dieser Konversation. Nicht
+untersucht, offener Punkt.
+
+
+--------------------------------------------------------------------------------
+ZUSAMMENFASSUNG: STAND DER skrl_ppo_cfg.yaml / phantomx_thesis_env_cfg.py AM ENDE DER SESSION
+--------------------------------------------------------------------------------
+
+agent.yaml (PPO): Netzwerk [256,256,256] (siehe Punkt 2/9 — vermutliche Problemursache, NICHT
+zurückgesetzt trotz Punkt 9-Befund, da User dies nach der Diff-Analyse explizit erneut so
+gewünscht hat), max_log_std=2.0, entropy_loss_scale=0.005, kl_threshold=0.008 (alle drei nach
+Punkt 10 zurückgesetzt auf Ausgangsstand).
+
+env_cfg.py (Basisklasse, PPO): lin_vel_kernel_width=0.05 (zurückgesetzt, Punkt 6/9),
+height_reward_scale=2.5 (NICHT zurückgesetzt, Punkt 7/9 — Diskrepanz zum Referenzlauf bleibt
+ungeklärt), movement_penalty phasenabhängig (Punkt 8), Curriculum 3-stufig 75k/300k (Punkt 5),
+joint_torque_reward_scale/joint_accel_reward_scale/clamp_reward-Mechanismus komplett entfernt
+(Punkt 4).
+
+OFFENE, UNGEKLÄRTE PUNKTE FÜR FOLGESESSIONS:
+  - Netzwerkgröße [256,256,256] ist der am stärksten belegte Verdächtige für das
+    Geh-Lern-Problem (Punkt 9), wurde aber auf expliziten User-Wunsch NICHT zurückgesetzt.
+  - height_reward_scale=2.5 vs. dem im Referenzlauf erfolgreichen 5.0 nicht aufgelöst.
+  - movement_speed_x (0.1 vs. 0.075 im alten Erfolgslauf), action_scale (0.5 vs. 0.75) und
+    episode_length_s (80.0 vs. 40.0) als bisher wenig beachtete, potenziell relevante
+    Unterschiede zu frühen erfolgreichen Läufen identifiziert, nicht weiter verfolgt (Punkt 12).
+  - Episode-Terminierungsursache (tilt vs. non_foot_contact vs. height) nicht aufgeschlüsselt
+    (Punkt 14).
+  - action_rate_reward_scale-Diskrepanz (-0.02 vs. zuvor besprochenes -0.05) nicht geklärt
+    (Punkt 15).

@@ -375,7 +375,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     if args_cli.record_trace is not None:
         if hasattr(env, "possible_agents"):
             raise NotImplementedError("--record_trace only supports single-agent envs.")
-        env.unwrapped._commands[:, 0] = 0.07
+        env.unwrapped._commands[:, 0] = 0.15
         env.unwrapped._commands[:, 1] = 0.0
         env.unwrapped._commands[:, 2] = 0.0
         _trace = {
@@ -437,7 +437,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
             obs, _, _, _, _ = env.step(actions)
 
             if _trace is not None:
-                env.unwrapped._commands[:, 0] = 0.07
+                env.unwrapped._commands[:, 0] = 0.15
                 env.unwrapped._commands[:, 1] = 0.0
                 env.unwrapped._commands[:, 2] = 0.0
                 _record_step(actions, obs)

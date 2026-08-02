@@ -1,4 +1,4 @@
-seed: 42
+seed: 1
 
 models:
   separate: True  # SAC always uses separate models
@@ -12,9 +12,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [128, 128]      # war [512,256,128] — für den nächsten Testlauf zurückgesetzt, um mit den
-                                 # bisher analysierten [128,128]-Runs vergleichbar zu bleiben und die teuerste,
-                                 # unbelegte Variable rauszunehmen (siehe Session-Log 2026-07-09, Punkt 10)
+        layers: [256, 256, 256]      # war [128,128] (davor [512,256,128], siehe Session-Log 2026-07-09, Punkt 10)
         activations: elu
     output: ACTIONS
 
@@ -24,7 +22,7 @@ models:
     network:
       - name: net
         input: concatenate([OBSERVATIONS, ACTIONS])
-        layers: [128, 128]
+        layers: [256, 256, 256]
         activations: elu
     output: ONE
 
@@ -34,7 +32,7 @@ models:
     network:
       - name: net
         input: concatenate([OBSERVATIONS, ACTIONS])
-        layers: [128, 128]
+        layers: [256, 256, 256]
         activations: elu
     output: ONE
 
@@ -44,7 +42,7 @@ models:
     network:
       - name: net
         input: concatenate([OBSERVATIONS, ACTIONS])
-        layers: [128, 128]
+        layers: [256, 256, 256]
         activations: elu
     output: ONE
 
@@ -54,7 +52,7 @@ models:
     network:
       - name: net
         input: concatenate([OBSERVATIONS, ACTIONS])
-        layers: [128, 128]
+        layers: [256, 256, 256]
         activations: elu
     output: ONE
 

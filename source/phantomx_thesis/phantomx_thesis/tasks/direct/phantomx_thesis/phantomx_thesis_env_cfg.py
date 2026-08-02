@@ -18,7 +18,7 @@ import isaaclab.terrains.trimesh.mesh_terrains_cfg as mesh_gen
 import isaaclab.terrains.height_field.hf_terrains_cfg as hf_gen
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab_assets.robots.phantomx import PHANTOMX_CFG  # isort: skip
+from isaaclab_assets.robots.phantomx import PHANTOMX_CFG  # isort: skipF
 
 # =====================================================
 # TERRAIN CONFIGURATION
@@ -29,7 +29,7 @@ from isaaclab_assets.robots.phantomx import PHANTOMX_CFG  # isort: skip
 # der Roboter wird nach Performance auf schwierigere versetzt.
 
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
-    seed=42,
+    seed=1,
     size=(8.0, 8.0),            # Größe jedes Sub-Terrains in Metern
     border_width=0.5,          # Breiter Rand damit Roboter nicht rausfällt
     num_rows=30,                # Anzahl Terrain-Reihen (Difficulty-Levels)
@@ -133,7 +133,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     # ENVIRONMENT SETUP
     # =====================================================
-    episode_length_s = 40.0
+    episode_length_s = 80.0  # 4000 Policy-Steps bei 50Hz (decimation=4, sim.dt=1/200).
     decimation = 4
     action_scale = 0.5       # Policy gibt direkte ±0.75 rad Abweichung von Default-Pose
     joint_pos_limit: float = 1.0  # ≈57.3° um Default-Stellung — proportional mit action_scale mitgezogen
@@ -247,15 +247,27 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.12    # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
-    movement_speed_x = 0.075     # 7.5 cm/s — max. Vorwärtsgeschwindigkeit (Curriculum: 0.035 → 0.075 m/s)
-    yaw_rotation_speed_x = 0.0   # 0.2 rad/s (~11°/s) — max. Yaw-Rate, ab 350k Schritten für Selbstkorrektur aktiv
+    target_base_height = 0.11   # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
+    movement_speed_x = 0.10     # max. Vorwärtsgeschwindigkeit (Curriculum: Stillstand bis 70k, danach volle Speed)
+    yaw_rotation_speed_x = 0.0   # max. Yaw-Rate, ab 70k Schritten zusammen mit voller Speed aktiv
 
     # =====================================================
     # ALGORITHM-VARIANT SWITCHES — Defaults reproduzieren exakt das heutige PPO-Verhalten.
     # Nur PhantomxThesisSACEnvCfg (siehe unten) überschreibt diese Werte.
     # =====================================================
-    lin_vel_kernel_width: float = 0.25    # Breite des exp(-error/width) Tracking-Kernels (lin_vel)
+    lin_vel_kernel_width: float = 0.25    # Breite des exp(-error/width) Tracking-Kernels (lin_vel).
+                                           # War 0.25 (praktisch blind: bei kompl. Stillstand noch
+                                           # 97.8% Reward). Zwischenzeitlich mehrfach verengt (0.05→
+                                           # 0.005→0.01), weil vermutet wurde, zu breiter Kernel
+                                           # belohne Stillstand zu stark — half aber nicht (PPO blieb
+                                           # bei 342k Steps bei ~0.01 m/s hängen). Tiefenanalyse gegen
+                                           # den nachweislich erfolgreichen Referenzlauf
+                                           # 2026-07-31_18-19-46_ppo_torch (erreichte 0.0955 m/s bei
+                                           # 600k Steps) zeigte: dieser Lauf nutzte bereits 0.05, nicht
+                                           # enger — die Verengung ging also in die falsche Richtung.
+                                           # Zurückgesetzt auf den nachweislich funktionierenden Wert
+                                           # 0.05. Wahrscheinlichere Ursache des aktuellen Problems:
+                                           # Curriculum-Timing (75k/300k statt 100k/350k im Referenzlauf).
     ang_vel_kernel_width: float = 0.25    # dito für yaw_rate
     # True: Actions vor Nutzung auf [-1,1] und q_def±joint_pos_limit klemmen. Für PPO UND SAC aktiv
     # (identisch zu SAC, das bereits so lief) — schließt eine dokumentierte Sim-to-Real-Lücke: das
@@ -263,21 +275,20 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # länger, PPO wurde bisher aber komplett ungeklemmt trainiert.
     strict_action_pipeline: bool = True
     continuous_movement_penalty: bool = False  # True: kontinuierlicher velocity-deficit statt binärer Penalty
-    use_sac_curriculum: bool = False      # True: schnellere, kommandorandomisierte Rampe statt 100k/350k-Stufen
-    clamp_reward: bool = False            # True: Gesamt-Reward auf ±reward_clamp_value geklemmt (Schutz vor
-                                           # seltenen Physik-Instabilitäts-Ausreißern, die sonst einzelne
-                                           # Replay-Buffer-Samples dominieren — siehe Q1(min)-Divergenz-Diagnose)
-    reward_clamp_value: float = 20.0      # nur wirksam wenn clamp_reward=True
 
     # =====================================================
-    # SIM-TO-REAL GAP MODELING — beide additiv, Default=deaktiviert (reproduziert exaktes
-    # heutiges Verhalten). Adressieren zwei der in der Sim-to-Real-Gap-Analyse identifizierten
-    # Lücken: (1) fehlende Latenz zwischen Policy-Aktion und tatsächlicher Anwendung
-    # (Servobus-/Inferenzlatenz existierte bisher gar nicht in der Simulation), (2) lin_vel_b
-    # als Ground-Truth-nahes Signal, obwohl die reale Hardware (kein Odometrie-Sensor) es nur
-    # über IMU-Doppelintegration mit akkumulierendem Bias schätzen kann.
+    # SIM-TO-REAL GAP MODELING — enable_action_latency standardmäßig AKTIV,
+    # lin_vel_estimation_mode wieder auf "ground_truth" zurückgesetzt (siehe Kommentar dort:
+    # Lauf 2026-07-27_15-11-56_ppo_torch hatte BEIDE Maßnahmen gleichzeitig mit einer bereits
+    # unabhängig vorhandenen PPO-σ-Explosion überlagert, wodurch der Effekt der einzelnen
+    # Maßnahmen nicht isolierbar war — Latenz bleibt aktiv, IMU-Integration wird für einen
+    # saubereren nächsten Vergleichslauf zunächst wieder deaktiviert). Adressiert eine der in der
+    # Sim-to-Real-Gap-Analyse identifizierten Lücken: fehlende Latenz zwischen Policy-Aktion und
+    # tatsächlicher Anwendung (Servobus-/Inferenzlatenz existierte bisher gar nicht in der
+    # Simulation). Auf False zurücksetzen, um exakt das Vor-Sim-to-Real-Gap-Verhalten zu
+    # reproduzieren (z.B. für einen A/B-Vergleich).
     # =====================================================
-    enable_action_latency: bool = False   # True: verzögert die tatsächlich angewendete PD-Ziel-
+    enable_action_latency: bool = True    # True: verzögert die tatsächlich angewendete PD-Ziel-
                                            # position um action_latency_steps_range Steps (siehe
                                            # _apply_action() in env.py) — bildet Servobus-/ROS2-
                                            # Messaging-/Inferenzlatenz nach, die im Training bisher
@@ -290,7 +301,8 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
                                                             # Envs weiterhin die unverzögerte
                                                             # Dynamik sieht (kein Alles-oder-Nichts).
 
-    lin_vel_estimation_mode: str = "ground_truth"  # "ground_truth": bisheriges Verhalten
+    lin_vel_estimation_mode: str = "ground_truth"  # ZURÜCKGESETZT (war "imu_integration", siehe
+                                                    # Kommentar oben) — bisheriges Verhalten
                                                     # (root_lin_vel_b + kleines Gaussian-Rauschen).
                                                     # "imu_integration": simuliert die reale
                                                     # Real-Data-Deployment-Pipeline (keine
@@ -320,33 +332,24 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 12.0      #12 hat gut funktioniert
     yaw_rate_reward_scale = 5.0
 
-    height_reward_scale = 5.0    # mit step_dt in env: 5.0 × 0.02 = 0.1/step max (wie 21.04. Working-Model)
+    height_reward_scale = 2.5    # war 5.0 — im Stillstand fast maximal (height_error≈0), lieferte
+                                  # zusammen mit foot_contact_reward mehr Netto-Reward fürs Stehen
+                                  # als movement_penalty fürs Stillstehen kostete (Roboter blieb bei
+                                  # ~0.004 m/s trotz movement_speed_x=0.1 hängen, Session 2026-08-01).
+                                  # Halbiert, um diesen Netto-Vorteil des Stillstands zu verkleinern,
+                                  # ohne die Kernel-Form (0.02) oder andere Terme anzufassen.
 
     # 🚫 PENALTIES (negative)
     z_vel_reward_scale = -5.0
     ang_vel_reward_scale = -7.0
-    joint_torque_reward_scale = 0.0 #-3e-5
-    # Gelenkbeschleunigungs-Strafe gegen hektische/ruckartige Bewegung. Startwert -2.5e-7
-    # (Original-PPO-Wert, siehe auskommentierter Optuna-Block unten) — jetzt sicher, weil
-    # joint_accel_clamp verhindert, dass ein Physik-Instabilitäts-Spike den Batch vergiftet
-    # (das war die eigentliche Ursache der früheren Q-Divergenz, nicht der Scale-Wert selbst).
-    # Für PPO und SAC bewusst gleich — kein separater SAC-Override mehr, um genau das
-    # "stille Überschreiben"-Bugmuster von vorhin nicht zu wiederholen.
-    joint_accel_reward_scale = 0.0 #-5e-7  #2.5e-7 hat ok funktioniert
-    joint_accel_clamp: float = 5.0e7    # Deckel auf sum(joint_acc²) VOR der Skalierung —
-                                          # Startwert, via Episode_Reward/dof_acc_l2 beobachten.
-                                          # Nach action_scale 0.5→0.75 (1.5x größere mögliche
-                                          # Gelenkauslenkung pro Aktion) erneut prüfen, ob dof_acc_l2
-                                          # jetzt am Clamp klebt — Beschleunigungs-Obergrenze skaliert
-                                          # potenziell mit dem Quadrat der Auslenkung (~2.25x)
-    action_rate_reward_scale = -0.05        #default -0.02
+    action_rate_reward_scale = -0.02        #default -0.02
     flat_orientation_reward_scale = -5.0
 
     # movement_penalty_scale deckt jetzt beide Richtungen ab: Unterschreiten (binär, PPO) plus
     # proportionales Überschreiten (siehe _compute_movement_penalty) — bewusst ein gemeinsamer
     # Scale-Wert statt eines eigenen, damit nicht zwei Stellschrauben für dasselbe Tracking-Ziel
     # gepflegt werden müssen.
-    movement_penalty_scale = 15.0       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
+    movement_penalty_scale = 15       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
 
     alive_reward_scale = 0.3
 
@@ -370,7 +373,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
                                               # über dem Terrain-Rauschen der leichteren
                                               # Sub-Terrains (random_rough/gravel_fine: 0.015-0.06m).
     swing_foot_height_reward_scale: float = 3.0  # AKTIVIERT (erster Testwert, siehe
-                                                  # height_reward_scale=5.0 als Größenvergleich) —
+                                                  # height_reward_scale=2.5 als Größenvergleich) —
                                                   # Episode_Reward/swing_foot_height weiter
                                                   # beobachten, bei Bedarf nachjustieren.
 
@@ -414,14 +417,9 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.12
-    movement_speed_x = 0.15
+    target_base_height = 0.11
+    movement_speed_x = 0.10
     yaw_rotation_speed_x = 0.0
-
-    # joint_torque_reward_scale / joint_accel_reward_scale: kein eigener SAC-Override mehr —
-    # beide erben jetzt bewusst denselben (geklemmten, sicheren) Wert aus der Basisklasse
-    # (siehe dortige Kommentare). Ein separater, stiller Override war zuvor die Ursache eines
-    # eigenen Bugs (Config-Änderung an der Basis griff für SAC nicht).
 
     termination_height = 0.000
 
@@ -432,7 +430,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     # Stillstand-Fall auf exp(-0.05²/0.005)=exp(-0.5)≈0,61 — deutlich sichtbare Lücke zu echtem
     # Tracking (~0,96-0,98 bei 80% Zielgeschwindigkeit) — Startwert, mit avg_forward_speed_mps
     # in TensorBoard beobachten.
-    lin_vel_kernel_width = 0.005
+    lin_vel_kernel_width = 0.25
     ang_vel_kernel_width = 0.1   # unverändert — für SAC aktuell wirkungslos (yaw_rotation_speed_x=0,
                                   # commands[:,2] immer 0), nicht Teil des Geh-Problems
 
@@ -442,10 +440,6 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     continuous_movement_penalty = True   # kontinuierlicher velocity-deficit statt binaerer Penalty —
                                           # die neue Overshoot-Strafe lebt nur im binären (PPO-)Zweig
                                           # von _compute_movement_penalty, SAC bleibt also unverändert
-    use_sac_curriculum = True            # schnellere, kommandorandomisierte Rampe (fertig ab 100k)
-    clamp_reward = True                  # off-policy Replay ist anfällig für einzelne Ausreißer-Samples,
-                                          # die einen ganzen Batch dominieren (PPO's on-policy Rollouts
-                                          # mitteln das pro Update weg) — siehe Q1(min)=-101-Diagnose
 
 
 @configclass
