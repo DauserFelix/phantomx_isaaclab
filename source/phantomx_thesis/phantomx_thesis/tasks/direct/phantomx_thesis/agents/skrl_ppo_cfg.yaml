@@ -12,7 +12,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [256, 256, 128]
+        layers: [256, 256, 256]
         activations: elu
     output: ACTIONS
   value:
@@ -21,7 +21,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [256, 256, 128]
+        layers: [256, 256, 256]
         activations: elu
     output: ONE
 

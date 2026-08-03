@@ -247,7 +247,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ROBOT Movement Params
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    target_base_height = 0.11   # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
+    target_base_height = 0.10   # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
     movement_speed_x = 0.10     # max. Vorwärtsgeschwindigkeit (Curriculum: Stillstand bis 70k, danach volle Speed)
     yaw_rotation_speed_x = 0.0   # max. Yaw-Rate, ab 70k Schritten zusammen mit voller Speed aktiv
 
@@ -367,7 +367,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # statt sauberem Anheben/Schwingen — kein bestehender Term (foot_contact/tripod_gait sind
     # reine Kontakt-Booleans, lazy_legs bestraft nur extrem lange Luftzeit >3s) erfasst bisher
     # die tatsächliche Fußhöhe während der Schwungphase.
-    swing_foot_height_target: float = 0.03  # m — Ziel-Clearance über Terrain-Referenz. Startwert
+    swing_foot_height_target: float = 0.04  # m — Ziel-Clearance über Terrain-Referenz. Startwert
                                               # konservativ: ~1/3 der Femur-Segmentlänge (≈6.6cm),
                                               # deutlich unter target_base_height=0.11m, aber klar
                                               # über dem Terrain-Rauschen der leichteren
@@ -417,7 +417,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
         replicate_physics=True,
     )
 
-    target_base_height = 0.11
+    target_base_height = 0.10
     movement_speed_x = 0.10
     yaw_rotation_speed_x = 0.0
 
