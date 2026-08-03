@@ -60,7 +60,7 @@ agent:
   time_limit_bootstrap: true
   experiment:
     directory: /workspace/projects/phantomx_thesis/scripts/skrl/logs/skrl/phantomx_ppo
-    experiment_name: 2026-08-02_22-21-38_ppo_torch
+    experiment_name: 2026-08-03_01-29-48_ppo_torch
     write_interval: 6000
     checkpoint_interval: 120000
 trainer:

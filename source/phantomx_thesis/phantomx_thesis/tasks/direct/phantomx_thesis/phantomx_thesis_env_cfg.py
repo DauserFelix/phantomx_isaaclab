@@ -349,7 +349,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # proportionales Überschreiten (siehe _compute_movement_penalty) — bewusst ein gemeinsamer
     # Scale-Wert statt eines eigenen, damit nicht zwei Stellschrauben für dasselbe Tracking-Ziel
     # gepflegt werden müssen.
-    movement_penalty_scale = 15       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
+    movement_penalty_scale = 35       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
 
     alive_reward_scale = 0.3
 

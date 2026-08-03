@@ -377,24 +377,9 @@ class PhantomxThesisEnv(DirectRLEnv):
         alive_reward = torch.ones_like(lin_vel_error)
 
         # Movement penalty: penalizes not moving forward (unconditional — wie Working-Model 21.04.)
-        # sowie (PPO, ab Phase 3) proportional zu schnelles Laufen — siehe _compute_movement_penalty.
-        # Phasenabhängig (Grenzen identisch zu _apply_velocity_curriculum):
-        #   Phase 1 (<75k, Stillstand):        komplett inaktiv (0.0) — kein Zielkommando vorhanden,
-        #                                       gegen das getrackt werden könnte.
-        #   Phase 2 (75k-300k, halbe Speed):    NUR nach unten (Deficit-Clamp, kein Overshoot-Penalty)
-        #                                       — der Roboter darf hier schneller als das
-        #                                       Zwischenziel laufen, ohne bestraft zu werden; nur
-        #                                       Zu-langsam-Sein kostet Reward.
-        #   Phase 3 (>=300k, volle Speed):      volle, symmetrische _compute_movement_penalty (wie
-        #                                       bisher) — jetzt muss auch Überschreiten vermieden
-        #                                       werden.
+        # sowie (PPO) proportional zu schnelles Laufen — siehe _compute_movement_penalty.
         forward_speed = self._robot.data.root_lin_vel_b[:, 0]
-        if self.common_step_counter < 75_000:
-            movement_penalty = torch.zeros_like(forward_speed)
-        elif self.common_step_counter < 300_000:
-            movement_penalty = torch.clamp(self._commands[:, 0] - forward_speed, min=0.0)
-        else:
-            movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
+        movement_penalty = self._compute_movement_penalty(forward_speed, self._commands[:, 0])
 
         # Raw speed accumulation for the true average-forward-speed metric (nicht Teil des
         # Rewards) — nur die x-Komponente (Vorwärtsrichtung), konsistent mit movement_penalty/
@@ -458,16 +443,19 @@ class PhantomxThesisEnv(DirectRLEnv):
 
     def _compute_movement_penalty(self, forward_speed: torch.Tensor, command_speed: torch.Tensor) -> torch.Tensor:
         if not self.cfg.continuous_movement_penalty:
-            # Symmetrisch-proportionales |v_actual - cmd| statt binärem Deficit (hart, 0/1) +
-            # linearem Overshoot (schwach) — der alte Split war für ein FESTES cfg.movement_speed_x
-            # kalibriert (deficit_penalty=1.0 bestrafte jedes Unterschreiten des Curriculum-Maximums
-            # gleich stark, unabhängig vom Abstand; overshoot_penalty wuchs dagegen nur linear und
-            # war bei kleinen cmd-Werten kaum spürbar, siehe Kernel-Analyse). Sobald command_speed
-            # nicht mehr konstant ist (Ranged-Command-Sampling), verstärkt diese Asymmetrie sich zu
-            # einem reinen "immer maximal schnell laufen"-Anreiz statt echtem Tracking — analog zum
-            # bereits in Log 07-14 §3 für dieselbe Formel gefundenen und behobenen Overshoot-Bias.
-            # torch.abs() macht command_speed selbst zum eindeutigen, symmetrischen Minimum.
-            return torch.abs(forward_speed - command_speed)
+            # Binary: wer nicht schneller als das aktuell aktive Curriculum-Kommando läuft,
+            # bekommt volle Strafe (vorher fix gegen cfg.movement_speed_x geprüft — das ist
+            # der Max-Wert der letzten Curriculum-Stufe, in früheren Stufen mit kleinerem
+            # Kommando also unerreichbar und damit fast permanent aktiv).
+            is_moving_forward = forward_speed > command_speed
+            deficit_penalty = (~is_moving_forward).float()
+
+            # Overshoot: proportionale Zusatzstrafe für zu schnelles Laufen, über denselben
+            # movement_penalty_scale skaliert (kein eigener Scale-Wert — track_lin_vel_xy_exp
+            # allein reagiert bei PPOs breitem lin_vel_kernel_width=0.25 zu schwach auf
+            # Überschreiten, SAC braucht das nicht, siehe engerer Kernel dort).
+            overshoot_penalty = torch.clamp(forward_speed - command_speed, min=0.0)
+            return deficit_penalty + overshoot_penalty
 
         # Continuous: proportionales Defizit zwischen Kommando und Ist-Geschwindigkeit, nur wenn
         # überhaupt ein nennenswertes Vorwärtskommando anliegt (Schwelle relativ zu movement_speed_x,
