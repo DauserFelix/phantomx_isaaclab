@@ -255,7 +255,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # ALGORITHM-VARIANT SWITCHES — Defaults reproduzieren exakt das heutige PPO-Verhalten.
     # Nur PhantomxThesisSACEnvCfg (siehe unten) überschreibt diese Werte.
     # =====================================================
-    lin_vel_kernel_width: float = 0.01    # Breite des exp(-error/width) Tracking-Kernels (lin_vel).
+    lin_vel_kernel_width: float = 0.025    # Breite des exp(-error/width) Tracking-Kernels (lin_vel).
                                            # War 0.25 (praktisch blind: bei kompl. Stillstand noch
                                            # 97.8% Reward). Zwischenzeitlich mehrfach verengt (0.05→
                                            # 0.005→0.01), weil vermutet wurde, zu breiter Kernel
@@ -268,13 +268,13 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
                                            # Zurückgesetzt auf den nachweislich funktionierenden Wert
                                            # 0.05. Wahrscheinlichere Ursache des aktuellen Problems:
                                            # Curriculum-Timing (75k/300k statt 100k/350k im Referenzlauf).
-    ang_vel_kernel_width: float = 0.01    # dito für yaw_rate
+    ang_vel_kernel_width: float = 0.1    # dito für yaw_rate
     # True: Actions vor Nutzung auf [-1,1] und q_def±joint_pos_limit klemmen. Für PPO UND SAC aktiv
     # (identisch zu SAC, das bereits so lief) — schließt eine dokumentierte Sim-to-Real-Lücke: das
     # ROS2-Deployment (phantomx_policy_simulation_interface.py) klemmt Actions/Joint-Targets schon
     # länger, PPO wurde bisher aber komplett ungeklemmt trainiert.
     strict_action_pipeline: bool = True
-    continuous_movement_penalty: bool = False  # True: kontinuierlicher velocity-deficit statt binärer Penalty
+    continuous_movement_penalty: bool = False # True: kontinuierlicher velocity-deficit statt binärer Penalty — Testlauf: gleiche Formel wie SAC, um PPO-Overshoot zu prüfen
 
     # =====================================================
     # SIM-TO-REAL GAP MODELING — enable_action_latency standardmäßig AKTIV,
@@ -430,7 +430,7 @@ class PhantomxThesisSACEnvCfg(PhantomxThesisEnvCfg):
     # Stillstand-Fall auf exp(-0.05²/0.005)=exp(-0.5)≈0,61 — deutlich sichtbare Lücke zu echtem
     # Tracking (~0,96-0,98 bei 80% Zielgeschwindigkeit) — Startwert, mit avg_forward_speed_mps
     # in TensorBoard beobachten.
-    lin_vel_kernel_width = 0.005
+    lin_vel_kernel_width = 0.025
     ang_vel_kernel_width = 0.1   # unverändert — für SAC aktuell wirkungslos (yaw_rotation_speed_x=0,
                                   # commands[:,2] immer 0), nicht Teil des Geh-Problems
 

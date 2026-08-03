@@ -121,6 +121,14 @@ class PhantomxThesisEnv(DirectRLEnv):
         # the raw height itself, so this gives a directly readable value in TensorBoard.
         self._episode_height_sum = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
+        # Per-env termination-cause masks, written every step in _get_dones() and read in
+        # _reset_idx() for logging — breaks down the aggregated `died` bool into which of the
+        # four conditions actually triggered it (TensorBoard: Episode_Termination/*).
+        self._termination_reasons = {
+            key: torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            for key in ["height_low", "height_high", "tilt", "body_contact"]
+        }
+
         # Logging
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -478,6 +486,11 @@ class PhantomxThesisEnv(DirectRLEnv):
         non_foot_forces = self._contact_sensor.data.net_forces_w[:, self._non_foot_body_ids, :]
         non_foot_contact = torch.any(torch.norm(non_foot_forces, dim=-1) > 1.0, dim=-1)
 
+        self._termination_reasons["height_low"][:] = mp_body_height < self.cfg.termination_height
+        self._termination_reasons["height_high"][:] = mp_body_height > 0.40
+        self._termination_reasons["tilt"][:] = tilt > self.cfg.termination_tilt
+        self._termination_reasons["body_contact"][:] = non_foot_contact
+
         died = (
             (mp_body_height < self.cfg.termination_height) |
             (mp_body_height > 0.40) |
@@ -578,7 +591,15 @@ class PhantomxThesisEnv(DirectRLEnv):
         self.extras["log"].update(extras)
 
         extras = dict()
-        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        # .item() bewusst weggelassen: skrl's SequentialTrainer übernimmt aus infos["log"] nur
+        # Werte mit isinstance(v, torch.Tensor) und v.numel() == 1 (siehe
+        # skrl/trainers/torch/sequential.py) — ein Python-int/float wird sonst stillschweigend
+        # ignoriert und taucht nie in TensorBoard auf.
+        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids])
+        extras["Episode_Termination/height_low"] = torch.count_nonzero(self._termination_reasons["height_low"][env_ids])
+        extras["Episode_Termination/height_high"] = torch.count_nonzero(self._termination_reasons["height_high"][env_ids])
+        extras["Episode_Termination/tilt"] = torch.count_nonzero(self._termination_reasons["tilt"][env_ids])
+        extras["Episode_Termination/body_contact"] = torch.count_nonzero(self._termination_reasons["body_contact"][env_ids])
         self.extras["log"].update(extras)
 
     def _apply_velocity_curriculum(self, env_ids: torch.Tensor):
