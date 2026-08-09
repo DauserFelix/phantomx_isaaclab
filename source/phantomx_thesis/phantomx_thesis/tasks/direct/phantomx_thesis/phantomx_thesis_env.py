@@ -138,6 +138,7 @@ class PhantomxThesisEnv(DirectRLEnv):
                 "lin_vel_z_l2",
                 "ang_vel_xy_l2",
                 "action_rate_l2",
+                "joint_vel_limits",
                 "flat_orientation_l2",
                 "alive",
                 "height_tracking",
@@ -363,6 +364,23 @@ class PhantomxThesisEnv(DirectRLEnv):
         # action rate penalty
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
 
+        # Ueberschreitung der Gelenkgeschwindigkeitsgrenze bestrafen.
+        # soft_joint_vel_limits wird aus cfg.velocity_limit des Aktuators befuellt
+        # (articulation.py:1903) und ist sonst ein reiner Datenpuffer ohne jede Wirkung:
+        # nur velocity_limit_sim erreicht den Solver, und dort als WEICHE Bremse
+        # ("the physics engine will actually try to brake", articulation.py:778-780), die
+        # Kontaktimpulse durchbrechen koennen. Messung ueber 500 Steps: 97.7% der Samples
+        # unter 3.5 rad/s, aber Spitzen bis 20.6 rad/s, und in 35.8% der Steps ueberschreitet
+        # mindestens ein Gelenk die Grenze. Ohne diesen Term hat die Policy keinerlei Anreiz,
+        # darunter zu bleiben — die Gelenkgeschwindigkeit taucht zwar in der Observation auf
+        # (obs[30:48]), aber in keinem Reward-Term. Erst hier bekommt sie Gradient darauf.
+        # Relevanz fuers Deployment: die ROS2-Bridge begrenzt die Zielaenderungsrate hart
+        # (max_action_delta), waehrend das Training bisher beliebig schnelle Gelenke zuliess.
+        joint_vel_excess = (
+            self._robot.data.joint_vel.abs() - self._robot.data.soft_joint_vel_limits
+        ).clip(min=0.0)
+        joint_vel_limits = torch.sum(joint_vel_excess, dim=1)
+
         # flat orientation penalty
         flat_orientation = torch.sum(
             torch.square(self._robot.data.projected_gravity_b[:, :2]),
@@ -431,6 +449,7 @@ class PhantomxThesisEnv(DirectRLEnv):
             "lin_vel_z_l2":         z_vel_error            * self.cfg.z_vel_reward_scale          * self.step_dt,
             "ang_vel_xy_l2":        ang_vel_error          * self.cfg.ang_vel_reward_scale        * self.step_dt,
             "action_rate_l2":       action_rate            * self.cfg.action_rate_reward_scale    * self.step_dt,
+            "joint_vel_limits":     joint_vel_limits       * self.cfg.joint_vel_limit_reward_scale * self.step_dt,
             "flat_orientation_l2":  flat_orientation       * self.cfg.flat_orientation_reward_scale * self.step_dt,
             "alive":                alive_reward           * self.cfg.alive_reward_scale          * self.step_dt,
             "height_tracking":      height_reward          * self.cfg.height_reward_scale         * self.step_dt,

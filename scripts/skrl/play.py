@@ -88,8 +88,11 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import hashlib
+import json
 import os
 import random
+import subprocess
 import time
 
 import gymnasium as gym
@@ -371,20 +374,52 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
     # phantomx_policy_simulation_interface.py's hardcoded self.commands — so the "commands"
     # segment of the observation is directly comparable; forced every step (not just once) so
     # an internal curriculum-driven reset mid-recording can't silently change it.
+    #
+    # Schema extended (2026-08-05) to also match phantomx_thesis_eval's trace_io.py format
+    # (t, meta, action_raw/action_applied/base_pos/base_quat/terminated etc.) — see
+    # _save_trace_io_compatible() below. UNCHANGED: the original key set (joint_pos, joint_vel,
+    # root_ang_vel_b, root_quat_w, projected_gravity_b, root_lin_vel_b, commands, actions,
+    # obs_noisy, obs_clean) is still written to the SAME .npz file under those same key names —
+    # existing consumers (compare_observations.py, compare_gz2_observations.py, the LabPlot
+    # exporter, existing recorded traces under scripts/diagnostic/npz_files/) keep working
+    # unmodified. trace_io.load_trace() in the eval package already tolerates missing 'meta' for
+    # exactly this backward-compatibility reason (see its docstring) — old traces recorded before
+    # this change simply have no 'meta' key, new ones recorded with this version do.
+    #
+    # trace_io.py itself is NOT imported here — play.py runs under Isaac Sim's own Python
+    # (isaac-sim.sh/AppLauncher), a separate interpreter from the ROS2 workspace's Python that
+    # phantomx_thesis_eval is installed into (see compare_observations.py's docstring for the
+    # same cross-interpreter constraint). A minimal, dependency-free inline copy of trace_io's
+    # ARRAY_KEYS/schema (pure numpy+json, matching phantomx_thesis_eval/trace_io.py) is used
+    # instead of a cross-package import — see _TRACE_IO_ARRAY_KEYS and _save_trace_io_compatible()
+    # below. Keep both copies in sync if the schema changes; it changes rarely.
     _trace = None
     if args_cli.record_trace is not None:
         if hasattr(env, "possible_agents"):
             raise NotImplementedError("--record_trace only supports single-agent envs.")
-        env.unwrapped._commands[:, 0] = 0.15
+        env.unwrapped._commands[:, 0] = 0.10
         env.unwrapped._commands[:, 1] = 0.0
         env.unwrapped._commands[:, 2] = 0.0
         _trace = {
             key: [] for key in [
-                "joint_pos", "joint_vel", "root_ang_vel_b", "root_quat_w",
+                "joint_pos", "joint_vel", "root_ang_vel_b", "root_quat_w", "root_pos_w",
                 "projected_gravity_b", "root_lin_vel_b", "commands", "actions",
                 "obs_noisy", "obs_clean",
             ]
         }
+
+    def _sha256_of_file(path: str) -> str:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def _git_commit_or_unknown() -> str:
+        try:
+            return subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except Exception:
+            return "unknown"
 
     def _record_step(applied_actions: torch.Tensor, obs_noisy: torch.Tensor) -> None:
         """Snapshot raw ground-truth robot state (env 0) plus the noisy/clean 66-dim
@@ -411,6 +446,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         _trace["joint_vel"].append(robot.data.joint_vel[0].cpu().numpy())
         _trace["root_ang_vel_b"].append(robot.data.root_ang_vel_b[0].cpu().numpy())
         _trace["root_quat_w"].append(robot.data.root_quat_w[0].cpu().numpy())
+        _trace["root_pos_w"].append(robot.data.root_pos_w[0].cpu().numpy())
         _trace["projected_gravity_b"].append(robot.data.projected_gravity_b[0].cpu().numpy())
         _trace["root_lin_vel_b"].append(robot.data.root_lin_vel_b[0].cpu().numpy())
         _trace["commands"].append(env_u._commands[0].cpu().numpy())
@@ -446,12 +482,69 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, expe
         if args_cli.video and timestep == args_cli.video_length:
             break
         if _trace is not None and len(_trace["obs_clean"]) >= args_cli.record_length:
+            n = len(_trace["obs_clean"])
+            legacy_arrays = {k: np.stack(v) for k, v in _trace.items()}
+
+            # New, trace_io-compatible arrays alongside the legacy ones — same file, additional
+            # keys. CONTROL_RATE_ISAAC_HZ=50.0 (decimation=4 @ sim.dt=0.005, see
+            # phantomx_thesis_eval/constants.py) is used for the synthetic 't' axis since Isaac's
+            # own step timing is not real time; unlike the ROS2 recorder (which uses actual
+            # arrival timestamps, see rollout_recorder.py), a fixed dt here is exact, not an
+            # approximation — Isaac Lab's decimation loop is not subject to OS/network jitter.
+            control_rate_hz = 1.0 / dt
+            t = np.arange(n, dtype=np.float64) / control_rate_hz
+            # NOTE: "joint_pos"/"joint_vel" are NOT repeated here — they already exist in
+            # legacy_arrays under those exact key names (see the _trace dict above), and
+            # trace_io's schema happens to use the same names for the same quantities. Repeating
+            # them here would collide with legacy_arrays' entries when both dicts are unpacked
+            # into np.savez() below (np.savez(**a, **b) raises TypeError on any duplicate key —
+            # caught by the manual smoke test in SMOKE_TEST.md before this reached a real run).
+            trace_io_arrays = {
+                "t": t,
+                "obs": legacy_arrays["obs_noisy"],
+                "action_raw": legacy_arrays["actions"],
+                "action_applied": legacy_arrays["actions"],  # Isaac applies no calibration layer
+                "base_pos": legacy_arrays["root_pos_w"],
+                "base_quat": legacy_arrays["root_quat_w"],
+                "base_lin_vel": legacy_arrays["root_lin_vel_b"],
+                "command": legacy_arrays["commands"],
+                "terminated": np.zeros(n, dtype=np.int64),
+            }
+            meta = {
+                "environment": "isaac",
+                "algorithm": algorithm,
+                "seed": int(args_cli.seed) if args_cli.seed is not None else -1,
+                "policy_path": resume_path,
+                "policy_sha256": _sha256_of_file(resume_path),
+                "gym_env_id": args_cli.task,
+                # trace_io.REQUIRED_META_FIELDS requires 'calibration' unconditionally (it does
+                # not know "isaac" is special) — Isaac applies no CalibrationLayer at all (see
+                # action_applied==action_raw above), so this is explicitly the identity/no-op
+                # calibration marker, not an omission. Mirrors calibration.SweepConfig's identity
+                # defaults (ema_alpha=1.0, k_action=1.0, n_latency=0.0) for anyone comparing this
+                # meta against a GZ/real trace's actual calibration dict.
+                "calibration": {"note": "no calibration layer applied (Isaac reference trace)"},
+                "control_rate_hz": control_rate_hz,
+                "duration_s": float(t[-1]) if n > 0 else 0.0,
+                "command_setpoint": legacy_arrays["commands"][0].tolist() if n > 0 else [0.0, 0.0, 0.0],
+                "git_commit": _git_commit_or_unknown(),
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                # ROBOT_MASS_SIM_KG from phantomx_thesis_eval/constants.py (1.561184726 kg,
+                # summed from full_phantom_isaacsim.urdf's 26 <mass> entries, see that file's
+                # comment for the full derivation) — duplicated as a literal here rather than
+                # imported, same cross-interpreter reasoning as trace_io's schema above.
+                "robot_mass_sim_kg": 1.561184726,
+            }
+
             np.savez(
                 args_cli.record_trace,
-                step=np.arange(len(_trace["obs_clean"])),
-                **{k: np.stack(v) for k, v in _trace.items()},
+                step=np.arange(n),
+                **legacy_arrays,
+                **trace_io_arrays,
+                meta=np.array(json.dumps(meta)),
             )
-            print(f"[INFO] Trace mit {len(_trace['obs_clean'])} Steps gespeichert: {args_cli.record_trace}")
+            print(f"[INFO] Trace mit {n} Steps gespeichert: {args_cli.record_trace}")
+            print(f"[INFO]   (legacy keys + trace_io-kompatible keys + meta, siehe SMOKE_TEST.md)")
             break
 
         # time delay for real-time evaluation

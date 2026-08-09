@@ -18,20 +18,34 @@ Normal.set_default_validate_args(False)
 def compute_action_scaling_direct(env, device: str | torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute physics-based action bounds for a DirectRLEnv (Fix 1).
 
-    For the PhantomX with symmetric joint limits:
-        action_range  = joint_pos_limit / action_scale = 1.0 / 0.75 = 1.333
-        action_bias   = 0.0  (symmetric around default pose)
+    Der nutzbare Actor-Bereich hängt davon ab, ob die Env die Actions vorher klemmt:
+
+    strict_action_pipeline=True (Default):
+        _pre_physics_step klemmt auf [-1, 1], BEVOR mit action_scale skaliert wird.
+        Alles, was der Actor jenseits von ±1 ausgibt, ist physikalisch identisch zu ±1 —
+        ein totes Band ohne Q-Gradient, in dem tanh sättigt, ohne je eine andere Wirkung
+        zu haben. Der Actor-Bereich muss deshalb exakt dem Clamp entsprechen:
+            action_range = 1.0
+
+    strict_action_pipeline=False:
+        Ohne Clamp darf der Actor die volle Gelenkmarge ausnutzen:
+            action_range = joint_pos_limit / action_scale
+
+    action_bias = 0.0 (symmetrisch um die Default-Pose)
 
     Returns:
         action_range: (num_actions,) tensor — half-range per action dimension
         action_bias:  (num_actions,) tensor — centre offset per action dimension
     """
     cfg = env.unwrapped.cfg
-    action_scale = float(cfg.action_scale)
-    joint_pos_limit = float(cfg.joint_pos_limit)
     num_actions = env.action_space.shape[0]
 
-    action_range = torch.full((num_actions,), joint_pos_limit / action_scale, device=device)
+    if getattr(cfg, "strict_action_pipeline", False):
+        range_value = 1.0
+    else:
+        range_value = float(cfg.joint_pos_limit) / float(cfg.action_scale)
+
+    action_range = torch.full((num_actions,), range_value, device=device)
     action_bias = torch.zeros(num_actions, device=device)
     return action_range, action_bias
 

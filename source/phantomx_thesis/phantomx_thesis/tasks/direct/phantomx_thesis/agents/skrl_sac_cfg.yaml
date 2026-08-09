@@ -1,4 +1,4 @@
-seed: 1
+seed: 4
 
 models:
   separate: True  # SAC always uses separate models

@@ -135,11 +135,43 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     episode_length_s = 80.0  # 4000 Policy-Steps bei 50Hz (decimation=4, sim.dt=1/200).
     decimation = 4
-    action_scale = 0.5       # Policy gibt direkte ±0.75 rad Abweichung von Default-Pose
-    joint_pos_limit: float = 1.0  # ≈57.3° um Default-Stellung — proportional mit action_scale mitgezogen
-                                   # (0.75/1.0, dieselbe relative Marge wie vorher 0.5/0.7854), damit das
-                                   # Clamp in _pre_physics_step weiterhin nur als Sicherheitsnetz wirkt und
-                                   # nicht bei Policy-Sättigung nahe ±1 ständig scharf eingreift
+    action_scale = 0.3       # Policy gibt direkte ±0.3 rad Abweichung von Default-Pose
+                             # (nach dem [-1,1]-Clamp in _pre_physics_step)
+                             #
+                             # HISTORIE 2026-08-09: 0.5 -> 0.3, um die kommandierte Zielaenderung
+                             # an die tatsaechliche Aktuator-Kapazitaet anzupassen. Messung aus
+                             # isaac_sac_seed1_trace.npz + Resonanzanalyse der Gelenkgeschwindigkeit:
+                             #   I_eff = 8.4 g m^2 (aus Resonanzspitze 4.30 Hz zurueckgerechnet)
+                             #   a_max = effort_limit / I_eff = 1.5 Nm / 8.4e-3 = 179 rad/s^2
+                             #   -> pro Regelschritt (0.02 s) bei Vollmoment erreichbar: 0.036 rad
+                             # Die Policy kommandierte aber 0.063 rad/Step (mittleres |da| 0.126
+                             # x action_scale 0.5) — Faktor 1.75 ueber dem physikalisch Moeglichen.
+                             # Folge: Gelenk zu 54% momentgesaettigt, mittlerer Regelfehler 0.283 rad
+                             # (16 Grad), erreichter Bewegungsumfang nur 52% des kommandierten.
+                             #
+                             # WARUM DAS DEN TRANSFER BLOCKIERT: Ein gesaettigtes Gelenk ist ein
+                             # NICHTLINEARES System — wo es saettigt und wie der Solver den Constraint
+                             # aufloest, unterscheidet sich zwischen PhysX und DART fundamental. Ein
+                             # nicht gesaettigtes Gelenk ist naeherungsweise linear (Sollwert rein,
+                             # Position raus) und wird von jeder Engine gleich reproduziert. Die
+                             # Policy lernte bisher nicht, weniger Moment zu nutzen, sondern den
+                             # SAETTIGUNGSANSCHLAG als Aktuator zu benutzen — und genau dessen
+                             # Dynamik transferiert nicht (Gazebo: Koerper-Drehrate 2.6x hoeher als
+                             # Isaac bei gleicher Sollwertamplitude).
+                             #
+                             # Mit 0.3 sinkt die kommandierte Rate auf ~0.038 rad/Step und liegt
+                             # damit nahe der Kapazitaet. Kostet wenig realen Bewegungsumfang: der
+                             # Roboter nutzte ohnehin nur 52% des kommandierten Bereichs.
+                             #
+                             # ACHTUNG — MUSS IM DEPLOYMENT MITGEZOGEN WERDEN:
+                             # ros2_ws/.../policy/phantomx_policy_simulation_interface.py:ACTION_SCALE
+                             # (ebenso _sweep.py und _real_data_interface.py). Ein Mismatch dort
+                             # skaliert JEDE Gelenkauslenkung falsch.
+    joint_pos_limit: float = 1.0  # ≈57.3° um Default-Stellung — reines Sicherheitsnetz mit Marge:
+                                   # bei strict_action_pipeline ist die reale Auslenkung auf
+                                   # action_scale·1.0 = 0.3 rad begrenzt, das Clamp greift also nie
+                                   # scharf ein. NICHT für den Actor-Bereich verwenden — siehe
+                                   # compute_action_scaling_direct() in agents/skrl_sac_models.py
     action_space = 18  # PhantomX: 6 legs × 3 joints = 18 DOF
 
     # Observation space:
@@ -248,7 +280,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # =====================================================
     robot: ArticulationCfg = PHANTOMX_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     target_base_height = 0.10   # MP_BODY at normal standing height (~20cm above ground)   -> 0.11-0.14 ist glaub sehr gut, da kann der roboter dann auch noch seine beine nach oben klappen!
-    movement_speed_x = 0.10     # max. Vorwärtsgeschwindigkeit (Curriculum: Stillstand bis 70k, danach volle Speed)
+    movement_speed_x = 0.1    # max. Vorwärtsgeschwindigkeit (Curriculum: Stillstand bis 70k, danach volle Speed)
     yaw_rotation_speed_x = 0.0   # max. Yaw-Rate, ab 70k Schritten zusammen mit voller Speed aktiv
 
     # =====================================================
@@ -332,7 +364,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 12.0      #12 hat gut funktioniert
     yaw_rate_reward_scale = 5.0
 
-    height_reward_scale = 2.5    # war 5.0 — im Stillstand fast maximal (height_error≈0), lieferte
+    height_reward_scale = 5.0     # war 5.0 — im Stillstand fast maximal (height_error≈0), lieferte
                                   # zusammen mit foot_contact_reward mehr Netto-Reward fürs Stehen
                                   # als movement_penalty fürs Stillstehen kostete (Roboter blieb bei
                                   # ~0.004 m/s trotz movement_speed_x=0.1 hängen, Session 2026-08-01).
@@ -342,14 +374,34 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # 🚫 PENALTIES (negative)
     z_vel_reward_scale = -5.0
     ang_vel_reward_scale = -7.0
-    action_rate_reward_scale = -0.02        #default -0.02
+    # HISTORIE 2026-08-09: -0.02 -> -0.1 (Faktor 5).
+    # Der Term war unter action_range=2.0 weitgehend BLIND: er rechnet auf self._actions, also
+    # der bereits auf [-1,1] geklemmten Aktion (phantomx_thesis_env.py:216 -> :364). Bei
+    # action_range=2.0 lagen 72-85% der Netzausgabe jenseits des Clips — jedes Zappeln dort war
+    # fuer die Glaettungsstrafe unsichtbar und damit kostenlos. Seit action_range=1.0
+    # (siehe compute_action_scaling_direct) sieht der Term die GESAMTE Bewegung; erst jetzt
+    # kann er ueberhaupt wirken.
+    # Zielgroesse: die kommandierte Zielaenderung soll die Aktuator-Kapazitaet von 0.036 rad
+    # pro Regelschritt nicht ueberschreiten (Herleitung siehe action_scale oben). Gemessen:
+    # ALT (range=2.0) 0.098 rad/Step = 36% Deckung | NEU (range=1.0) 0.063 = 57% |
+    # PPO, das im Deployment funktioniert: 0.056 = 64%. Die Reihenfolge korreliert exakt mit
+    # der Deployment-Tauglichkeit, deshalb wird der Term hier gezielt verstaerkt statt die
+    # Verbesserung dem Zufall zu ueberlassen.
+    action_rate_reward_scale = -0.1         # war -0.02 (skrl-Default) bis 2026-08-09
+    # Strafe fuer Ueberschreiten von data.soft_joint_vel_limits (= velocity_limit des
+    # Aktuators, aktuell 3.5 rad/s). Term = Summe der Ueberschreitung ueber alle 18 Gelenke.
+    # Groessenordnung aus einem 500-Step-Trace: mean 0.749, p95 3.54 pro Step; bei -0.1 ergibt
+    # das einen mittleren Beitrag von -0.075 und liegt damit gleichauf mit action_rate_l2
+    # (-0.069) — bewusst kein dominierender Term, sondern ein Korrektiv gleicher Ordnung.
+    # 0.0 schaltet den Term ab (Verhalten wie vor 2026-08-08).
+    joint_vel_limit_reward_scale = -0.1
     flat_orientation_reward_scale = -5.0
 
     # movement_penalty_scale deckt jetzt beide Richtungen ab: Unterschreiten (binär, PPO) plus
     # proportionales Überschreiten (siehe _compute_movement_penalty) — bewusst ein gemeinsamer
     # Scale-Wert statt eines eigenen, damit nicht zwei Stellschrauben für dasselbe Tracking-Ziel
     # gepflegt werden müssen.
-    movement_penalty_scale = 35       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
+    movement_penalty_scale = 25       #10 hat gut funktioniert #bei SAC:25 hat perfect funktioniert
 
     alive_reward_scale = 0.3
 
@@ -381,7 +433,7 @@ class PhantomxThesisEnvCfg(DirectRLEnvCfg):
     # TERMINATION THRESHOLDS - RELAXED FOR LEARNING
     # =====================================================
     termination_height = 0.00    # MP_BODY < 15cm → kollabiert (≙ base_link < 5cm + 10cm Offset)
-    termination_tilt = 0.03     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
+    termination_tilt = 0.05     # gx²+gy² > 0.10 → ~18° Neigung — exakter Wert aus funktionierendem Modell
 
 
 @configclass
